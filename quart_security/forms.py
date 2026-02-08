@@ -4,7 +4,7 @@ import secrets
 
 from markupsafe import Markup, escape
 from quart import request
-from wtforms import BooleanField, PasswordField, StringField
+from wtforms import BooleanField, PasswordField, RadioField, StringField
 from wtforms.form import Form
 from wtforms.validators import DataRequired, Email, EqualTo, Optional
 
@@ -93,7 +93,15 @@ class RecoveryCodeForm(QuartForm):
 
 class WebAuthnRegisterForm(QuartForm):
     name = StringField("Credential Name", validators=[DataRequired()])
+    usage = RadioField(
+        "Usage",
+        choices=[("secondary", "Multi-factor only"), ("primary", "Passwordless sign-in")],
+        default="secondary",
+        validators=[DataRequired()],
+    )
 
 
 class WebAuthnVerifyForm(QuartForm):
+    identity = StringField("Email", validators=[Optional()])
+    remember = BooleanField("Remember me")
     credential = StringField("Credential", validators=[Optional()])

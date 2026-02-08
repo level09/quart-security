@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import datetime
+import json
 import secrets
+from urllib.parse import urlsplit
 
 from quart import (
     Blueprint,
     abort,
     current_app,
     flash,
-    jsonify,
     redirect,
     render_template,
     request,
@@ -18,11 +19,11 @@ from quart import (
 )
 from werkzeug.routing import BuildError
 
+from . import webauthn as wan
 from .decorators import auth_required
 from .forms import (
     QuartForm,
     RecoveryCodeForm,
-    TwoFactorSetupForm,
     TwoFactorVerifyForm,
     WebAuthnRegisterForm,
     WebAuthnVerifyForm,
@@ -89,6 +90,160 @@ def _ensure_csrf_token() -> str:
         csrf_token = secrets.token_urlsafe(32)
         session["_csrf_token"] = csrf_token
     return csrf_token
+
+
+def _safe_redirect_target(candidate: str | None, fallback: str = "/") -> str:
+    if not candidate:
+        return fallback
+    parts = urlsplit(candidate)
+    if parts.scheme or parts.netloc:
+        return fallback
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return fallback
+    return candidate
+
+
+def _webauthn_rp_id() -> str:
+    configured = current_app.config.get("SECURITY_WAN_RP_ID")
+    if configured:
+        return str(configured)
+    return request.host.split(":", 1)[0]
+
+
+def _webauthn_expected_origin() -> str:
+    configured = current_app.config.get("SECURITY_WAN_EXPECTED_ORIGIN")
+    if configured:
+        return str(configured)
+    return f"{request.scheme}://{request.host}"
+
+
+def _webauthn_rp_name() -> str:
+    return str(current_app.config.get("SECURITY_WAN_RP_NAME") or current_app.name)
+
+
+def _set_wan_state(key: str, **payload):
+    session[key] = {
+        "payload": payload,
+        "issued_at": int(datetime.datetime.utcnow().timestamp()),
+    }
+
+
+def _pop_wan_state(key: str, max_age_seconds: int = 300) -> dict | None:
+    state = session.pop(key, None)
+    if not isinstance(state, dict):
+        return None
+    issued_at = state.get("issued_at")
+    payload = state.get("payload")
+    if not isinstance(issued_at, int) or not isinstance(payload, dict):
+        return None
+    age = int(datetime.datetime.utcnow().timestamp()) - issued_at
+    if age < 0 or age > max_age_seconds:
+        return None
+    return payload
+
+
+async def _list_webauthn_credentials(user, usage: str | None = None):
+    getter = getattr(_security.datastore, "get_webauthn_credentials", None)
+    if getter:
+        credentials = await current_app.ensure_async(getter)(user, usage=usage)
+    else:
+        credentials = list(getattr(user, "webauthn", None) or [])
+        if usage:
+            credentials = [
+                credential
+                for credential in credentials
+                if getattr(credential, "usage", None) == usage
+            ]
+    return credentials
+
+
+async def _find_webauthn_credential(credential_id: bytes, user=None):
+    finder = getattr(_security.datastore, "find_webauthn_credential", None)
+    if finder:
+        return await current_app.ensure_async(finder)(credential_id, user=user)
+
+    candidates = list(getattr(user, "webauthn", None) or []) if user else []
+    for credential in candidates:
+        if getattr(credential, "credential_id", None) == credential_id:
+            return credential
+    return None
+
+
+async def _create_webauthn_credential(user, **kwargs):
+    creator = getattr(_security.datastore, "create_webauthn_credential", None)
+    if creator:
+        return await current_app.ensure_async(creator)(user, **kwargs)
+    raise RuntimeError("Datastore does not implement create_webauthn_credential")
+
+
+async def _delete_webauthn_credential(user, credential):
+    deleter = getattr(_security.datastore, "delete_webauthn_credential", None)
+    if deleter:
+        return await current_app.ensure_async(deleter)(user, credential)
+
+    user_credentials = getattr(user, "webauthn", None)
+    if user_credentials is not None and credential in user_credentials:
+        user_credentials.remove(credential)
+        return True
+    return False
+
+
+def _extract_webauthn_credential_id(credential_payload: dict | None) -> bytes | None:
+    if not isinstance(credential_payload, dict):
+        return None
+    raw_id = credential_payload.get("id") or credential_payload.get("rawId")
+    if not isinstance(raw_id, str):
+        return None
+    try:
+        return wan.base64url_to_bytes(raw_id)
+    except Exception:
+        return None
+
+
+async def _extract_webauthn_credential_payload():
+    payload = await request.get_json(silent=True)
+    if isinstance(payload, dict):
+        if isinstance(payload.get("credential"), dict):
+            return payload["credential"]
+        if "id" in payload and "response" in payload:
+            return payload
+
+    form_data = await request.form
+    raw = form_data.get("credential")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _format_webauthn_credential(credential) -> dict:
+    raw_id = getattr(credential, "credential_id", b"")
+    if isinstance(raw_id, memoryview):
+        raw_id = raw_id.tobytes()
+    if isinstance(raw_id, bytearray):
+        raw_id = bytes(raw_id)
+    if not isinstance(raw_id, bytes):
+        raw_id = str(raw_id).encode("utf-8")
+
+    last_use = getattr(credential, "lastuse_datetime", None)
+    if isinstance(last_use, datetime.datetime):
+        last_use = last_use.isoformat(timespec="seconds")
+    elif last_use is None:
+        last_use = "Never"
+
+    return {
+        "id": wan.bytes_to_base64url(raw_id),
+        "name": getattr(credential, "name", "Unnamed credential"),
+        "usage": getattr(credential, "usage", "secondary"),
+        "device_type": getattr(credential, "device_type", "unknown"),
+        "last_use": last_use,
+    }
 
 
 @security_bp.route("/login", methods=["GET", "POST"])
@@ -451,35 +606,253 @@ async def wan_register():
         abort(404)
 
     form = await WebAuthnRegisterForm.from_formdata()
+    response_form = await QuartForm.from_formdata()
+    delete_form = await QuartForm.from_formdata()
+
+    registered_credentials = await _list_webauthn_credentials(current_user)
+    serialized_credentials = [
+        _format_webauthn_credential(credential) for credential in registered_credentials
+    ]
+
+    credential_options = None
+    if _is_post():
+        await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+
+        if not form.validate():
+            await flash("Please provide a valid credential name.", "error")
+            return await render_template(
+                "security/wan_register.html",
+                wan_register_form=form,
+                wan_register_response_form=response_form,
+                wan_delete_form=delete_form,
+                credential_options=None,
+                registered_credentials=serialized_credentials,
+            )
+
+        requested_usage = (form.usage.data or "secondary").strip().lower()
+        if requested_usage == "primary" and not current_app.config.get(
+            "SECURITY_WAN_ALLOW_AS_FIRST_FACTOR", True
+        ):
+            await flash(
+                "Passwordless passkey sign-in is disabled for this deployment.",
+                "error",
+            )
+            return await render_template(
+                "security/wan_register.html",
+                wan_register_form=form,
+                wan_register_response_form=response_form,
+                wan_delete_form=delete_form,
+                credential_options=None,
+                registered_credentials=serialized_credentials,
+            )
+
+        if not getattr(current_user, "fs_webauthn_user_handle", None):
+            current_user.fs_webauthn_user_handle = secrets.token_urlsafe(32)
+
+        challenge = secrets.token_bytes(32)
+        options = await wan.begin_registration(
+            current_user,
+            rp_id=_webauthn_rp_id(),
+            rp_name=_webauthn_rp_name(),
+            challenge=challenge,
+            existing_credentials=registered_credentials,
+        )
+        credential_options = wan.options_to_json_dict(options)
+
+        _set_wan_state(
+            "wan_register_state",
+            challenge=wan.bytes_to_base64url(challenge),
+            name=form.name.data.strip(),
+            usage=requested_usage,
+        )
+        await _commit()
+
     return await render_template(
         "security/wan_register.html",
         wan_register_form=form,
-        credential_options=None,
-        registered_credentials=[],
+        wan_register_response_form=response_form,
+        wan_delete_form=delete_form,
+        credential_options=credential_options,
+        registered_credentials=serialized_credentials,
     )
 
 
 @security_bp.route("/wan-register-response", methods=["POST"])
+@auth_required("session")
 async def wan_register_response():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
-    return jsonify({"error": "WebAuthn registration response not implemented"}), 501
+
+    await _enforce_csrf()
+    state = _pop_wan_state("wan_register_state")
+    if not state:
+        await flash("Passkey registration expired. Please try again.", "error")
+        return redirect(url_for_security("wan_register"))
+
+    credential_payload = await _extract_webauthn_credential_payload()
+    if not credential_payload:
+        await flash("Invalid passkey registration payload.", "error")
+        return redirect(url_for_security("wan_register"))
+
+    try:
+        verification = await wan.complete_registration(
+            credential_payload,
+            challenge=wan.base64url_to_bytes(state["challenge"]),
+            rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_expected_origin(),
+            require_user_verification=current_app.config.get(
+                "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
+            ),
+        )
+    except Exception:
+        await flash("Passkey registration failed.", "error")
+        return redirect(url_for_security("wan_register"))
+
+    existing = await _find_webauthn_credential(
+        verification["credential_id"], user=current_user
+    )
+    if existing:
+        await flash("This passkey is already registered.", "warning")
+        return redirect(url_for_security("wan_register"))
+
+    await _create_webauthn_credential(
+        current_user,
+        credential_id=verification["credential_id"],
+        public_key=verification["public_key"],
+        sign_count=verification["sign_count"],
+        name=state.get("name", "Passkey"),
+        usage=state.get("usage", "secondary"),
+        backup_state=verification.get("backup_state", False),
+        device_type=verification.get("device_type") or "single_device",
+        lastuse_datetime=datetime.datetime.utcnow(),
+    )
+    await _commit()
+
+    await flash("Passkey registered successfully.", "success")
+    return redirect(url_for_security("wan_register"))
 
 
 @security_bp.route("/wan-signin", methods=["GET", "POST"])
 async def wan_signin():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
+    if not current_app.config.get("SECURITY_WAN_ALLOW_AS_FIRST_FACTOR", True):
+        abort(404)
 
     form = await WebAuthnVerifyForm.from_formdata()
-    return await render_template("security/wan_signin.html", wan_signin_form=form)
+    response_form = await QuartForm.from_formdata()
+
+    credential_options = None
+    if _is_post():
+        await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+        identity = _normalize_email(form.identity.data)
+        if not identity:
+            await flash("Email is required.", "error")
+            return await render_template(
+                "security/wan_signin.html",
+                wan_signin_form=form,
+                wan_signin_response_form=response_form,
+                credential_options=None,
+            )
+
+        user = await _find_user(email=identity)
+        if user is None or not getattr(user, "active", True):
+            await flash("Unable to authenticate with passkey.", "error")
+            return await render_template(
+                "security/wan_signin.html",
+                wan_signin_form=form,
+                wan_signin_response_form=response_form,
+                credential_options=None,
+            )
+
+        credentials = await _list_webauthn_credentials(user)
+        credentials = [
+            credential
+            for credential in credentials
+            if getattr(credential, "usage", "secondary") in {"primary", "first"}
+        ]
+        if not credentials:
+            await flash("No passkey is configured for passwordless sign-in.", "error")
+            return await render_template(
+                "security/wan_signin.html",
+                wan_signin_form=form,
+                wan_signin_response_form=response_form,
+                credential_options=None,
+            )
+
+        challenge = secrets.token_bytes(32)
+        options = await wan.begin_authentication(
+            credentials,
+            rp_id=_webauthn_rp_id(),
+            challenge=challenge,
+        )
+        credential_options = wan.options_to_json_dict(options)
+        _set_wan_state(
+            "wan_signin_state",
+            challenge=wan.bytes_to_base64url(challenge),
+            user_id=user.get_id(),
+            remember=bool(form.remember.data),
+        )
+
+    return await render_template(
+        "security/wan_signin.html",
+        wan_signin_form=form,
+        wan_signin_response_form=response_form,
+        credential_options=credential_options,
+    )
 
 
 @security_bp.route("/wan-signin-response", methods=["POST"])
 async def wan_signin_response():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
-    return jsonify({"error": "WebAuthn signin response not implemented"}), 501
+    if not current_app.config.get("SECURITY_WAN_ALLOW_AS_FIRST_FACTOR", True):
+        abort(404)
+
+    await _enforce_csrf()
+    state = _pop_wan_state("wan_signin_state")
+    if not state:
+        await flash("Passkey sign-in expired. Please try again.", "error")
+        return redirect(url_for_security("wan_signin"))
+
+    user = await _find_user(fs_uniquifier=state.get("user_id"))
+    if user is None:
+        await flash("Unable to find user for passkey sign-in.", "error")
+        return redirect(url_for_security("wan_signin"))
+
+    credential_payload = await _extract_webauthn_credential_payload()
+    credential_id = _extract_webauthn_credential_id(credential_payload)
+    if not credential_payload or credential_id is None:
+        await flash("Invalid passkey response payload.", "error")
+        return redirect(url_for_security("wan_signin"))
+
+    stored_credential = await _find_webauthn_credential(credential_id, user=user)
+    if stored_credential is None:
+        await flash("Passkey not recognized.", "error")
+        return redirect(url_for_security("wan_signin"))
+
+    try:
+        new_sign_count = await wan.complete_authentication(
+            credential_payload,
+            challenge=wan.base64url_to_bytes(state["challenge"]),
+            rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_expected_origin(),
+            stored_credential=stored_credential,
+            require_user_verification=current_app.config.get(
+                "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
+            ),
+        )
+    except Exception:
+        await flash("Passkey verification failed.", "error")
+        return redirect(url_for_security("wan_signin"))
+
+    stored_credential.sign_count = int(new_sign_count)
+    if hasattr(stored_credential, "lastuse_datetime"):
+        stored_credential.lastuse_datetime = datetime.datetime.utcnow()
+
+    session.permanent = bool(state.get("remember"))
+    await _security.login_user(user)
+    return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
 
 
 @security_bp.route("/wan-verify", methods=["GET", "POST"])
@@ -487,13 +860,156 @@ async def wan_signin_response():
 async def wan_verify():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
+    if not current_app.config.get("SECURITY_WAN_ALLOW_AS_MULTI_FACTOR", True):
+        abort(404)
 
     form = await WebAuthnVerifyForm.from_formdata()
-    return await render_template("security/wan_verify.html", wan_verify_form=form)
+    response_form = await QuartForm.from_formdata()
+    credential_options = None
+
+    if _is_post():
+        await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+        credentials = await _list_webauthn_credentials(current_user)
+        credentials = [
+            credential
+            for credential in credentials
+            if getattr(credential, "usage", "secondary") in {"secondary", "primary"}
+        ]
+        if not credentials:
+            await flash("No passkey is configured for this account.", "error")
+            return await render_template(
+                "security/wan_verify.html",
+                wan_verify_form=form,
+                wan_verify_response_form=response_form,
+                credential_options=None,
+            )
+
+        challenge = secrets.token_bytes(32)
+        options = await wan.begin_authentication(
+            credentials,
+            rp_id=_webauthn_rp_id(),
+            challenge=challenge,
+        )
+        credential_options = wan.options_to_json_dict(options)
+        _set_wan_state(
+            "wan_verify_state",
+            challenge=wan.bytes_to_base64url(challenge),
+            user_id=current_user.get_id(),
+            next=_safe_redirect_target(request.args.get("next"), fallback="/"),
+        )
+
+    return await render_template(
+        "security/wan_verify.html",
+        wan_verify_form=form,
+        wan_verify_response_form=response_form,
+        credential_options=credential_options,
+    )
 
 
 @security_bp.route("/wan-verify-response", methods=["POST"])
+@auth_required("session")
 async def wan_verify_response():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
-    return jsonify({"error": "WebAuthn verify response not implemented"}), 501
+    if not current_app.config.get("SECURITY_WAN_ALLOW_AS_MULTI_FACTOR", True):
+        abort(404)
+
+    await _enforce_csrf()
+    state = _pop_wan_state("wan_verify_state")
+    if not state:
+        await flash("Passkey verification expired. Please try again.", "error")
+        return redirect(url_for_security("wan_verify"))
+
+    if state.get("user_id") != current_user.get_id():
+        await flash("Passkey verification context mismatch.", "error")
+        return redirect(url_for_security("wan_verify"))
+
+    credential_payload = await _extract_webauthn_credential_payload()
+    credential_id = _extract_webauthn_credential_id(credential_payload)
+    if not credential_payload or credential_id is None:
+        await flash("Invalid passkey response payload.", "error")
+        return redirect(url_for_security("wan_verify"))
+
+    stored_credential = await _find_webauthn_credential(credential_id, user=current_user)
+    if stored_credential is None:
+        await flash("Passkey not recognized.", "error")
+        return redirect(url_for_security("wan_verify"))
+
+    try:
+        new_sign_count = await wan.complete_authentication(
+            credential_payload,
+            challenge=wan.base64url_to_bytes(state["challenge"]),
+            rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_expected_origin(),
+            stored_credential=stored_credential,
+            require_user_verification=current_app.config.get(
+                "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
+            ),
+        )
+    except Exception:
+        await flash("Passkey verification failed.", "error")
+        return redirect(url_for_security("wan_verify"))
+
+    stored_credential.sign_count = int(new_sign_count)
+    if hasattr(stored_credential, "lastuse_datetime"):
+        stored_credential.lastuse_datetime = datetime.datetime.utcnow()
+
+    session["_fresh"] = True
+    await _commit()
+
+    await flash("Passkey verification successful.", "success")
+    return redirect(_safe_redirect_target(state.get("next"), fallback="/"))
+
+
+@security_bp.route("/wan-delete", methods=["POST"])
+@auth_required("session")
+async def wan_delete():
+    if not current_app.config.get("SECURITY_WEBAUTHN", False):
+        abort(404)
+
+    payload = await request.get_json(silent=True)
+    csrf_token = None
+    credential_name = None
+    credential_id = None
+
+    if isinstance(payload, dict):
+        csrf_token = payload.get("csrf_token")
+        credential_name = payload.get("name")
+        credential_id = payload.get("credential_id")
+    else:
+        form_data = await request.form
+        csrf_token = form_data.get("csrf_token")
+        credential_name = form_data.get("name")
+        credential_id = form_data.get("credential_id")
+
+    await _enforce_csrf(csrf_token)
+
+    credentials = await _list_webauthn_credentials(current_user)
+    target = None
+
+    if credential_id:
+        try:
+            decoded = wan.base64url_to_bytes(str(credential_id))
+        except Exception:
+            decoded = None
+        if decoded is not None:
+            target = await _find_webauthn_credential(decoded, user=current_user)
+
+    if target is None and credential_name:
+        for credential in credentials:
+            if getattr(credential, "name", None) == credential_name:
+                target = credential
+                break
+
+    if target is None:
+        await flash("Passkey not found.", "error")
+        if isinstance(payload, dict):
+            return {"error": "Passkey not found"}, 404
+        return redirect(url_for_security("wan_register"))
+
+    await _delete_webauthn_credential(current_user, target)
+    await _commit()
+    await flash("Passkey removed.", "success")
+    if isinstance(payload, dict):
+        return {"status": "ok"}
+    return redirect(url_for_security("wan_register"))

@@ -1,3 +1,4 @@
+import datetime
 from dataclasses import dataclass, field
 from itertools import count
 
@@ -12,6 +13,19 @@ from quart_security.models import RoleMixin, UserMixin
 class Role(RoleMixin):
     name: str
     description: str | None = None
+
+
+@dataclass
+class WebAuthnCredential:
+    credential_id: bytes
+    public_key: bytes
+    sign_count: int
+    name: str
+    usage: str = "secondary"
+    backup_state: bool = False
+    device_type: str = "single_device"
+    lastuse_datetime: datetime.datetime | None = None
+    user_id: str | None = None
 
 
 @dataclass
@@ -31,6 +45,8 @@ class User(UserMixin):
     tf_primary_method: str | None = None
     tf_totp_secret: str | None = None
     mf_recovery_codes: list[str] | None = None
+    fs_webauthn_user_handle: str | None = None
+    webauthn: list[WebAuthnCredential] = field(default_factory=list)
 
     @property
     def has_usable_password(self):
@@ -95,13 +111,44 @@ class InMemoryDatastore:
     def commit(self):
         return None
 
+    def get_webauthn_credentials(self, user, usage=None):
+        credentials = list(user.webauthn or [])
+        if usage:
+            credentials = [
+                credential
+                for credential in credentials
+                if getattr(credential, "usage", None) == usage
+            ]
+        return credentials
+
+    def find_webauthn_credential(self, credential_id, user=None):
+        candidates = self.get_webauthn_credentials(user) if user else []
+        for credential in candidates:
+            if credential.credential_id == credential_id:
+                return credential
+        return None
+
+    def create_webauthn_credential(self, user, **kwargs):
+        credential = WebAuthnCredential(**kwargs)
+        credential.user_id = user.fs_webauthn_user_handle
+        user.webauthn.append(credential)
+        return credential
+
+    def delete_webauthn_credential(self, user, credential):
+        if credential in user.webauthn:
+            user.webauthn.remove(credential)
+            return True
+        return False
+
 
 @pytest.fixture
 def datastore():
     return InMemoryDatastore()
 
 
-def _build_app(datastore: InMemoryDatastore, *, two_factor: bool) -> Quart:
+def _build_app(
+    datastore: InMemoryDatastore, *, two_factor: bool, webauthn: bool
+) -> Quart:
     app = Quart(__name__)
     app.config.update(
         SECRET_KEY="test-secret",
@@ -114,7 +161,7 @@ def _build_app(datastore: InMemoryDatastore, *, two_factor: bool) -> Quart:
         SECURITY_REGISTERABLE=True,
         SECURITY_CHANGEABLE=True,
         SECURITY_TWO_FACTOR=two_factor,
-        SECURITY_WEBAUTHN=False,
+        SECURITY_WEBAUTHN=webauthn,
     )
 
     Security(app, datastore)
@@ -163,14 +210,24 @@ def client(app):
 
 @pytest.fixture
 def app(datastore):
-    return _build_app(datastore, two_factor=False)
+    return _build_app(datastore, two_factor=False, webauthn=False)
 
 
 @pytest.fixture
 def app_two_factor(datastore):
-    return _build_app(datastore, two_factor=True)
+    return _build_app(datastore, two_factor=True, webauthn=False)
 
 
 @pytest.fixture
 def client_two_factor(app_two_factor):
     return app_two_factor.test_client()
+
+
+@pytest.fixture
+def app_webauthn(datastore):
+    return _build_app(datastore, two_factor=False, webauthn=True)
+
+
+@pytest.fixture
+def client_webauthn(app_webauthn):
+    return app_webauthn.test_client()

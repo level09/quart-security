@@ -8,7 +8,7 @@ This package provides:
 - registration and password change
 - `current_user`, `auth_required`, `roles_required`
 - TOTP and recovery-code helpers
-- WebAuthn helper wrappers
+- WebAuthn register/sign-in/verify flows (passkeys/security keys)
 - Flask-Security-compatible endpoint naming via `url_for_security()`
 
 ## Tooling
@@ -25,4 +25,4 @@ uv run pytest -q
 
 ## Status
 
-Initial implementation focused on core auth and migration compatibility.
+Core auth + TOTP + WebAuthn flows implemented with Quart-native async handlers.

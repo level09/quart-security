@@ -1,7 +1,92 @@
+{% from 'security/_macros.html' import render_input %}
 <!doctype html>
-<title>Passkey Signin</title>
-<h1>Sign in with passkey</h1>
-<p>WebAuthn signin transport is scaffolded; response endpoint is pending.</p>
-<form method="post" action="{{ url_for_security('wan_signin') }}">
-  <button type="submit">Start passkey signin</button>
+<title>Passkey Sign In</title>
+<h1>Sign In with Passkey</h1>
+
+{% if not credential_options %}
+<form method="post" action="{{ url_for_security('wan_signin') }}" id="wan-signin-form">
+  {{ wan_signin_form.hidden_tag() }}
+  {{ render_input(wan_signin_form.identity) }}
+  <label style="display: block; margin-bottom: 0.75rem;">
+    {{ wan_signin_form.remember }} {{ wan_signin_form.remember.label.text }}
+  </label>
+  <button type="submit">Continue</button>
 </form>
+<p><a href="{{ url_for_security('login') }}">Back to password login</a></p>
+{% else %}
+<p>Complete passkey sign-in in your browser prompt.</p>
+<form method="post" action="{{ url_for_security('wan_signin_response') }}" id="wan-signin-response-form">
+  {{ wan_signin_response_form.hidden_tag() }}
+  <input type="hidden" id="credential" name="credential" value="">
+</form>
+<div id="wan-errors" style="color: #b42318;"></div>
+{% endif %}
+
+{% if credential_options %}
+<script>
+  function b64urlToArrayBuffer(base64url) {
+    const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
+    const base64 = (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) {
+      bytes[i] = raw.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  function arrayBufferToB64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function decodeAuthenticationOptions(options) {
+    const decoded = structuredClone(options);
+    decoded.challenge = b64urlToArrayBuffer(decoded.challenge);
+    if (Array.isArray(decoded.allowCredentials)) {
+      decoded.allowCredentials = decoded.allowCredentials.map((credential) => ({
+        ...credential,
+        id: b64urlToArrayBuffer(credential.id),
+      }));
+    }
+    return decoded;
+  }
+
+  function encodeAuthenticationCredential(credential) {
+    return {
+      id: credential.id,
+      rawId: arrayBufferToB64url(credential.rawId),
+      type: credential.type,
+      response: {
+        clientDataJSON: arrayBufferToB64url(credential.response.clientDataJSON),
+        authenticatorData: arrayBufferToB64url(credential.response.authenticatorData),
+        signature: arrayBufferToB64url(credential.response.signature),
+        userHandle: credential.response.userHandle
+          ? arrayBufferToB64url(credential.response.userHandle)
+          : null,
+      },
+    };
+  }
+
+  async function startSignin() {
+    const options = decodeAuthenticationOptions({{ credential_options | tojson }});
+    try {
+      const credential = await navigator.credentials.get({ publicKey: options });
+      if (!credential) {
+        throw new Error('No credential returned');
+      }
+      document.getElementById('credential').value = JSON.stringify(encodeAuthenticationCredential(credential));
+      document.getElementById('wan-signin-response-form').submit();
+    } catch (error) {
+      const details = error && error.message ? error.message : 'Passkey sign-in failed.';
+      document.getElementById('wan-errors').textContent = details;
+    }
+  }
+
+  startSignin();
+</script>
+{% endif %}
