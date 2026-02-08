@@ -342,14 +342,15 @@ async def two_factor_token_validation():
         session.pop("tf_user_id", None)
         return redirect(url_for_security("login"))
 
-    if _is_post() and form.validate():
-        token = form.token.data.strip()
+    if _is_post():
+        form_data = await request.form
+        token = (form_data.get("code") or form_data.get("token") or "").strip()
         valid = False
 
-        if getattr(user, "tf_totp_secret", None):
+        if token and getattr(user, "tf_totp_secret", None):
             valid = verify_totp(user.tf_totp_secret, token)
 
-        if not valid and current_app.config.get(
+        if not valid and token and current_app.config.get(
             "SECURITY_MULTI_FACTOR_RECOVERY_CODES", True
         ):
             codes = list(getattr(user, "mf_recovery_codes", None) or [])
