@@ -245,24 +245,17 @@ async def two_factor_setup():
         generate_recovery_codes,
         generate_totp_secret,
         get_totp_uri,
+        verify_totp,
     )
 
-    setup_form = await TwoFactorSetupForm.from_formdata()
-    verify_form = await TwoFactorVerifyForm.from_formdata()
     primary_method = getattr(current_user, "tf_primary_method", None) or "none"
-    chosen_method = None
-    authr_qrcode = None
-    authr_key = None
 
     if _is_post():
-        await _enforce_csrf(
-            getattr(setup_form, "_submitted_csrf", None)
-            or getattr(verify_form, "_submitted_csrf", None)
-        )
         form_data = await request.form
-        setup_action = form_data.get("setup")
+        await _enforce_csrf(form_data.get("csrf_token"))
+        action = form_data.get("action")
 
-        if setup_action == "disable":
+        if action == "disable":
             current_user.tf_totp_secret = None
             current_user.tf_primary_method = None
             session.pop("tf_pending_secret", None)
@@ -273,27 +266,10 @@ async def two_factor_setup():
             await flash("Two-factor authentication disabled.", "success")
             return redirect(url_for_security("two_factor_setup"))
 
-        if setup_action == "authenticator":
-            # User clicked "Setup" — show QR code
+        if action == "verify":
+            token = (form_data.get("token") or "").strip()
             pending_secret = session.get("tf_pending_secret")
-            if not pending_secret:
-                pending_secret = generate_totp_secret()
-                session["tf_pending_secret"] = pending_secret
-            chosen_method = "authenticator"
-            issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
-            uri = get_totp_uri(pending_secret, current_user.email, issuer)
-            authr_qrcode = generate_qr_code(uri)
-            authr_key = pending_secret
-
-    # Handle verify form submission (has "token" field from tf-validate action)
-    if _is_post() and not chosen_method:
-        form_data = await request.form
-        token = form_data.get("token", "").strip()
-        if token:
-            from .totp import verify_totp
-
-            pending_secret = session.get("tf_pending_secret")
-            if pending_secret and verify_totp(pending_secret, token):
+            if pending_secret and token and verify_totp(pending_secret, token):
                 current_user.tf_totp_secret = pending_secret
                 current_user.tf_primary_method = "authenticator"
                 session.pop("tf_pending_secret", None)
@@ -316,21 +292,28 @@ async def two_factor_setup():
                 await flash("Two-factor authentication enabled.", "success")
                 return redirect(url_for_security("mf_recovery_codes"))
 
-            await flash("Invalid authentication code", "error")
-            # Re-show the QR code
-            if pending_secret:
-                chosen_method = "authenticator"
-                issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
-                uri = get_totp_uri(pending_secret, current_user.email, issuer)
-                authr_qrcode = generate_qr_code(uri)
-                authr_key = pending_secret
+            await flash("Invalid authentication code.", "error")
+            return redirect(url_for_security("two_factor_setup"))
+
+    # GET: generate or reuse pending secret for QR
+    setup_form = await QuartForm.from_formdata()
+    authr_qrcode = None
+    authr_key = None
+
+    if primary_method == "none":
+        pending_secret = session.get("tf_pending_secret")
+        if not pending_secret:
+            pending_secret = generate_totp_secret()
+            session["tf_pending_secret"] = pending_secret
+        authr_key = pending_secret
+        issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
+        uri = get_totp_uri(pending_secret, current_user.email, issuer)
+        authr_qrcode = generate_qr_code(uri)
 
     return await render_template(
         "security/two_factor_setup.html",
         two_factor_setup_form=setup_form,
-        two_factor_verify_code_form=verify_form,
         primary_method=primary_method,
-        chosen_method=chosen_method,
         authr_qrcode=authr_qrcode,
         authr_key=authr_key,
     )
