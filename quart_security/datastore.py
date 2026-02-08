@@ -21,8 +21,6 @@ class SQLAlchemyUserDatastore:
         return getattr(self.db, "session", self.db)
 
     def _first(self, model, **kwargs):
-        if hasattr(model, "query"):
-            return model.query.filter_by(**kwargs).first()
         stmt = select(model).filter_by(**kwargs)
         return self.session.execute(stmt).scalars().first()
 

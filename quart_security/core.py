@@ -15,6 +15,33 @@ from .signals import user_authenticated, user_logged_out
 from .utils import url_for_security
 
 
+class _SecurityConfig:
+    """Exposes SECURITY_* config flags as template-friendly attributes."""
+
+    _MAP = {
+        "registerable": "SECURITY_REGISTERABLE",
+        "recoverable": "SECURITY_RECOVERABLE",
+        "confirmable": "SECURITY_CONFIRMABLE",
+        "changeable": "SECURITY_CHANGEABLE",
+        "trackable": "SECURITY_TRACKABLE",
+        "two_factor": "SECURITY_TWO_FACTOR",
+        "webauthn": "SECURITY_WEBAUTHN",
+        "wan_allow_as_first_factor": "SECURITY_WAN_ALLOW_AS_FIRST_FACTOR",
+        "wan_allow_as_multi_factor": "SECURITY_WAN_ALLOW_AS_MULTI_FACTOR",
+        "support_mfa": "SECURITY_TWO_FACTOR",
+        "multi_factor_recovery_codes": "SECURITY_MULTI_FACTOR_RECOVERY_CODES",
+    }
+
+    def __init__(self, config):
+        self._config = config
+
+    def __getattr__(self, name):
+        key = self._MAP.get(name)
+        if key:
+            return self._config.get(key, False)
+        raise AttributeError(f"'security' has no attribute '{name}'")
+
+
 class Security:
     """Quart extension implementing session-based authentication."""
 
@@ -69,7 +96,10 @@ class Security:
 
             @app.context_processor
             async def _security_context():
-                return {"current_user": current_user}
+                return {
+                    "current_user": current_user,
+                    "security": _SecurityConfig(current_app.config),
+                }
 
             app.extensions["quart_security_context_registered"] = True
 

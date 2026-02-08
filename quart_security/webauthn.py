@@ -34,7 +34,7 @@ async def begin_registration(user, rp_id, rp_name, existing_credentials=None):
     exclude_credentials = []
     for cred in existing_credentials or []:
         exclude_credentials.append(
-            api["PublicKeyCredentialDescriptor"](id=getattr(cred, "credential_id"))
+            api["PublicKeyCredentialDescriptor"](id=cred.credential_id)
         )
 
     return api["generate_registration_options"](

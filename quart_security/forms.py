@@ -16,6 +16,13 @@ class QuartForm(Form):
         csrf = False
 
     _submitted_csrf: str | None = None
+    form_errors: list = []
+
+    class _DummyField:
+        errors = []
+        id = "csrf_token"
+
+    csrf_token = _DummyField()
 
     @classmethod
     async def from_formdata(cls):

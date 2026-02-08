@@ -20,6 +20,7 @@ from werkzeug.routing import BuildError
 
 from .decorators import auth_required
 from .forms import (
+    QuartForm,
     RecoveryCodeForm,
     TwoFactorSetupForm,
     TwoFactorVerifyForm,
@@ -223,7 +224,14 @@ async def change_password():
         await flash("Password updated", "success")
         return redirect(url_for_security("change_password"))
 
-    return await render_template("security/change_password.html", change_password_form=form)
+    active_password = bool(getattr(current_user, "password", None)) and getattr(
+        current_user, "has_usable_password", True
+    )
+    return await render_template(
+        "security/change_password.html",
+        change_password_form=form,
+        active_password=active_password,
+    )
 
 
 @security_bp.route("/tf-setup", methods=["GET", "POST"])
@@ -237,45 +245,94 @@ async def two_factor_setup():
         generate_recovery_codes,
         generate_totp_secret,
         get_totp_uri,
-        verify_totp,
     )
 
-    form = await TwoFactorSetupForm.from_formdata()
-    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
-    pending_secret = session.get("tf_pending_secret")
-    if not pending_secret:
-        pending_secret = generate_totp_secret()
-        session["tf_pending_secret"] = pending_secret
+    setup_form = await TwoFactorSetupForm.from_formdata()
+    verify_form = await TwoFactorVerifyForm.from_formdata()
+    primary_method = getattr(current_user, "tf_primary_method", None) or "none"
+    chosen_method = None
+    authr_qrcode = None
+    authr_key = None
 
-    if _is_post() and form.validate():
-        if verify_totp(pending_secret, form.token.data.strip()):
-            current_user.tf_totp_secret = pending_secret
-            current_user.tf_primary_method = "authenticator"
+    if _is_post():
+        await _enforce_csrf(
+            getattr(setup_form, "_submitted_csrf", None)
+            or getattr(verify_form, "_submitted_csrf", None)
+        )
+        form_data = await request.form
+        setup_action = form_data.get("setup")
+
+        if setup_action == "disable":
+            current_user.tf_totp_secret = None
+            current_user.tf_primary_method = None
             session.pop("tf_pending_secret", None)
-
-            if current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
-                if not getattr(current_user, "mf_recovery_codes", None):
-                    count = current_app.config.get(
-                        "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N", 3
-                    )
-                    current_user.mf_recovery_codes = generate_recovery_codes(count)
-
             await _commit()
-            tf_profile_changed.send(current_app._get_current_object(), user=current_user)
-            await flash("Two-factor authentication enabled.", "success")
-            return redirect(url_for_security("mf_recovery_codes"))
+            tf_profile_changed.send(
+                current_app._get_current_object(), user=current_user
+            )
+            await flash("Two-factor authentication disabled.", "success")
+            return redirect(url_for_security("two_factor_setup"))
 
-        await flash("Invalid authentication code", "error")
+        if setup_action == "authenticator":
+            # User clicked "Setup" — show QR code
+            pending_secret = session.get("tf_pending_secret")
+            if not pending_secret:
+                pending_secret = generate_totp_secret()
+                session["tf_pending_secret"] = pending_secret
+            chosen_method = "authenticator"
+            issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
+            uri = get_totp_uri(pending_secret, current_user.email, issuer)
+            authr_qrcode = generate_qr_code(uri)
+            authr_key = pending_secret
 
-    issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
-    uri = get_totp_uri(pending_secret, current_user.email, issuer)
-    qrcode_data = generate_qr_code(uri)
+    # Handle verify form submission (has "token" field from tf-validate action)
+    if _is_post() and not chosen_method:
+        form_data = await request.form
+        token = form_data.get("token", "").strip()
+        if token:
+            from .totp import verify_totp
+
+            pending_secret = session.get("tf_pending_secret")
+            if pending_secret and verify_totp(pending_secret, token):
+                current_user.tf_totp_secret = pending_secret
+                current_user.tf_primary_method = "authenticator"
+                session.pop("tf_pending_secret", None)
+
+                if current_app.config.get(
+                    "SECURITY_MULTI_FACTOR_RECOVERY_CODES", True
+                ):
+                    if not getattr(current_user, "mf_recovery_codes", None):
+                        count = current_app.config.get(
+                            "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N", 3
+                        )
+                        current_user.mf_recovery_codes = generate_recovery_codes(
+                            count
+                        )
+
+                await _commit()
+                tf_profile_changed.send(
+                    current_app._get_current_object(), user=current_user
+                )
+                await flash("Two-factor authentication enabled.", "success")
+                return redirect(url_for_security("mf_recovery_codes"))
+
+            await flash("Invalid authentication code", "error")
+            # Re-show the QR code
+            if pending_secret:
+                chosen_method = "authenticator"
+                issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
+                uri = get_totp_uri(pending_secret, current_user.email, issuer)
+                authr_qrcode = generate_qr_code(uri)
+                authr_key = pending_secret
 
     return await render_template(
         "security/two_factor_setup.html",
-        two_factor_setup_form=form,
-        tf_qrcode=qrcode_data,
-        tf_secret=pending_secret,
+        two_factor_setup_form=setup_form,
+        two_factor_verify_code_form=verify_form,
+        primary_method=primary_method,
+        chosen_method=chosen_method,
+        authr_qrcode=authr_qrcode,
+        authr_key=authr_key,
     )
 
 
@@ -342,7 +399,9 @@ async def mf_recovery_codes():
 
     from .totp import generate_recovery_codes
 
-    codes = list(getattr(current_user, "mf_recovery_codes", None) or [])
+    # A dummy form just for hidden_tag() CSRF support
+    form = await QuartForm.from_formdata()
+    codes = []
 
     if _is_post():
         await _enforce_csrf()
@@ -352,11 +411,16 @@ async def mf_recovery_codes():
         await _commit()
         tf_profile_changed.send(current_app._get_current_object(), user=current_user)
         await flash("Recovery codes regenerated.", "success")
+    elif request.args.get("show_codes"):
+        codes = list(getattr(current_user, "mf_recovery_codes", None) or [])
+
+    has_codes = bool(getattr(current_user, "mf_recovery_codes", None))
 
     return await render_template(
         "security/mf_recovery_codes.html",
         recovery_codes=codes,
-        csrf_token=_ensure_csrf_token(),
+        has_codes=has_codes or bool(codes),
+        mf_recovery_codes_form=form,
     )
 
 

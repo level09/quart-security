@@ -34,7 +34,8 @@ def generate_qr_code(uri: str) -> str:
     image = qrcode.make(uri)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
 
 
 def verify_totp(secret: str, token: str) -> bool:
