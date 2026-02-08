@@ -32,7 +32,7 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
 
     post_response = await client_two_factor.post(
         "/tf-setup",
-        form={"token": "123456"},
+        form={"action": "verify", "token": "123456"},
     )
 
     assert post_response.status_code == 302
