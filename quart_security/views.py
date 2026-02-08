@@ -24,6 +24,7 @@ from .decorators import auth_required
 from .forms import (
     QuartForm,
     RecoveryCodeForm,
+    TwoFactorSetupForm,
     TwoFactorVerifyForm,
     WebAuthnRegisterForm,
     WebAuthnVerifyForm,
@@ -452,7 +453,7 @@ async def two_factor_setup():
                 url_for_security("two_factor_setup") + "?setup=authenticator"
             )
 
-    setup_form = await QuartForm.from_formdata()
+    setup_form = await TwoFactorSetupForm.from_formdata()
     chosen_method = None
     authr_qrcode = None
     authr_key = None
