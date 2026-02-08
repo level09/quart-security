@@ -1,0 +1,10 @@
+{% from 'security/_macros.html' import render_input %}
+<!doctype html>
+<title>Register Passkey</title>
+<h1>Register passkey</h1>
+<p>WebAuthn registration transport is scaffolded; response endpoint is pending.</p>
+<form method="post" action="{{ url_for_security('wan_register') }}">
+  {{ wan_register_form.hidden_tag() }}
+  {{ render_input(wan_register_form.name) }}
+  <button type="submit">Start registration</button>
+</form>

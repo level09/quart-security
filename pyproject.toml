@@ -1,0 +1,63 @@
+[build-system]
+requires = ["flit_core>=3.9,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "quart-security"
+version = "0.1.0"
+description = "Native async auth for Quart"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "quart-security maintainers" },
+]
+dependencies = [
+  "quart>=0.20.0",
+  "sqlalchemy>=2.0",
+  "passlib>=1.7",
+  "pyotp>=2.9",
+  "qrcode>=8.0",
+  "py_webauthn>=2.0",
+  "wtforms>=3.1",
+  "aiosmtplib>=3.0",
+  "blinker>=1.7",
+  "itsdangerous>=2.1",
+  "email-validator>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/level09/quart-security"
+Repository = "https://github.com/level09/quart-security"
+Issues = "https://github.com/level09/quart-security/issues"
+
+[tool.flit.module]
+name = "quart_security"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.uv]
+default-groups = ["dev"]

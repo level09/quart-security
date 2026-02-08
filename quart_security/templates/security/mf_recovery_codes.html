@@ -1,0 +1,13 @@
+<!doctype html>
+<title>Recovery Codes</title>
+<h1>Recovery codes</h1>
+<p>Store these in a safe place. Each code can be used once.</p>
+<ul>
+  {% for code in recovery_codes %}
+    <li><code>{{ code }}</code></li>
+  {% endfor %}
+</ul>
+<form method="post" action="{{ url_for_security('mf_recovery_codes') }}">
+  <input id="csrf_token" name="csrf_token" type="hidden" value="{{ csrf_token }}">
+  <button type="submit">Regenerate codes</button>
+</form>

@@ -1,0 +1,9 @@
+{% from 'security/_macros.html' import render_input %}
+<!doctype html>
+<title>Recovery Code</title>
+<h1>Use recovery code</h1>
+<form method="post" action="{{ url_for_security('mf_recovery') }}">
+  {{ recovery_form.hidden_tag() }}
+  {{ render_input(recovery_form.code) }}
+  <button type="submit">Continue</button>
+</form>

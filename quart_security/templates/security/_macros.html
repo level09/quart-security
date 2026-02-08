@@ -1,0 +1,9 @@
+{% macro render_input(field, type='text') -%}
+<div style="margin-bottom: 0.75rem;">
+  <label>{{ field.label.text }}</label><br>
+  {{ field(type=type) }}
+  {% if field.errors %}
+    <div style="color: #b42318;">{{ field.errors | join(', ') }}</div>
+  {% endif %}
+</div>
+{%- endmacro %}

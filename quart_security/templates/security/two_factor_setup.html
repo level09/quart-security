@@ -1,0 +1,12 @@
+{% from 'security/_macros.html' import render_input %}
+<!doctype html>
+<title>Two-Factor Setup</title>
+<h1>Set up two-factor authentication</h1>
+<p>Scan this QR code in your authenticator app.</p>
+<img alt="TOTP QR" src="data:image/png;base64,{{ tf_qrcode }}" />
+<p>Or enter this secret manually: <code>{{ tf_secret }}</code></p>
+<form method="post" action="{{ url_for_security('two_factor_setup') }}">
+  {{ two_factor_setup_form.hidden_tag() }}
+  {{ render_input(two_factor_setup_form.token) }}
+  <button type="submit">Verify and enable</button>
+</form>
