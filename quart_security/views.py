@@ -450,7 +450,12 @@ async def wan_register():
         abort(404)
 
     form = await WebAuthnRegisterForm.from_formdata()
-    return await render_template("security/wan_register.html", wan_register_form=form)
+    return await render_template(
+        "security/wan_register.html",
+        wan_register_form=form,
+        credential_options=None,
+        registered_credentials=[],
+    )
 
 
 @security_bp.route("/wan-register-response", methods=["POST"])
