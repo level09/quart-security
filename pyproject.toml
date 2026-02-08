@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "quart-security"
-version = "0.1.0"
+version = "1.0.0"
 description = "Native async auth for Quart"
 readme = "README.md"
 requires-python = ">=3.11"

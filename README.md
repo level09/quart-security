@@ -203,6 +203,16 @@ Run:
 uv run pytest -q
 ```
 
+### WebAuthn staging validation (recommended before release tags)
+
+Run this in a HTTPS staging environment with production-like hostnames and real browser prompts:
+
+1. Register a passkey from `/wan-register` and verify it is persisted with expected `name`, `usage`, and `sign_count`.
+2. Complete passwordless sign-in from `/wan-signin` with the same credential.
+3. Complete authenticated verify flow from `/wan-verify` while already signed in.
+4. Delete credential from `/wan-delete` and confirm subsequent passkey auth fails for that credential.
+5. Repeat step 1 and step 2 with a second authenticator type (for example platform passkey + hardware key) to validate device portability assumptions.
+
 ## Notes for Production
 
 - Run behind HTTPS for WebAuthn in non-local environments.
