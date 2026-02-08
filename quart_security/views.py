@@ -293,14 +293,18 @@ async def two_factor_setup():
                 return redirect(url_for_security("mf_recovery_codes"))
 
             await flash("Invalid authentication code.", "error")
-            return redirect(url_for_security("two_factor_setup"))
+            return redirect(
+                url_for_security("two_factor_setup") + "?setup=authenticator"
+            )
 
-    # GET: generate or reuse pending secret for QR
     setup_form = await QuartForm.from_formdata()
+    chosen_method = None
     authr_qrcode = None
     authr_key = None
 
-    if primary_method == "none":
+    # Only show QR when user explicitly chose to set up authenticator
+    if primary_method == "none" and request.args.get("setup") == "authenticator":
+        chosen_method = "authenticator"
         pending_secret = session.get("tf_pending_secret")
         if not pending_secret:
             pending_secret = generate_totp_secret()
@@ -314,6 +318,7 @@ async def two_factor_setup():
         "security/two_factor_setup.html",
         two_factor_setup_form=setup_form,
         primary_method=primary_method,
+        chosen_method=chosen_method,
         authr_qrcode=authr_qrcode,
         authr_key=authr_key,
     )
