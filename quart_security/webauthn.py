@@ -1,4 +1,4 @@
-"""Thin wrappers over py_webauthn primitives."""
+"""Thin wrappers over the webauthn package primitives."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def _require_webauthn():
         )
         from webauthn.helpers.structs import PublicKeyCredentialDescriptor
     except ImportError as exc:
-        raise RuntimeError("py_webauthn is required for WebAuthn support") from exc
+        raise RuntimeError("webauthn package is required for WebAuthn support") from exc
 
     return {
         "generate_authentication_options": generate_authentication_options,
