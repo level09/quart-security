@@ -27,7 +27,7 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
         form={"email": "user@example.com", "password": "correct-password"},
     )
 
-    get_response = await client_two_factor.get("/tf-setup")
+    get_response = await client_two_factor.get("/tf-setup?setup=authenticator")
     assert get_response.status_code == 200
 
     post_response = await client_two_factor.post(
