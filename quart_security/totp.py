@@ -45,11 +45,17 @@ def verify_totp(secret: str, token: str) -> bool:
 
 
 def generate_recovery_codes(n: int = 3) -> list[str]:
-    return [secrets.token_hex(4) for _ in range(n)]
+    codes = []
+    for _ in range(n):
+        raw = secrets.token_hex(5)
+        codes.append(f"{raw[:5]}-{raw[5:]}")
+    return codes
 
 
 def verify_recovery_code(code: str, stored_codes: list[str]) -> tuple[bool, list[str]]:
-    if code in stored_codes:
-        remaining = [item for item in stored_codes if item != code]
-        return True, remaining
+    normalized = code.strip().lower().replace("-", "").replace(" ", "")
+    for stored in stored_codes:
+        if normalized == stored.replace("-", ""):
+            remaining = [item for item in stored_codes if item != stored]
+            return True, remaining
     return False, stored_codes
