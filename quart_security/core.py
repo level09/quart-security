@@ -144,9 +144,7 @@ class Security:
             g._current_user = AnonymousUser()
             return
 
-        user = await current_app.ensure_async(self.datastore.find_user)(
-            fs_uniquifier=user_id
-        )
+        user = await self.datastore.find_user(fs_uniquifier=user_id)
         g._current_user = user or AnonymousUser()
 
     async def login_user(self, user, fresh=True):
@@ -170,15 +168,15 @@ class Security:
             user.current_login_ip = request.remote_addr
             user.login_count = (getattr(user, "login_count", None) or 0) + 1
 
-        await current_app.ensure_async(self.datastore.commit)()
-        user_authenticated.send(app, user=user, authn_via="session")
+        await self.datastore.commit()
+        await user_authenticated.send_async(app, user=user, authn_via="session")
 
     async def logout_user(self, user=None):
         app = current_app._get_current_object()
         target_user = user or getattr(g, "_current_user", AnonymousUser())
 
         if getattr(target_user, "is_authenticated", False):
-            user_logged_out.send(app, user=target_user)
+            await user_logged_out.send_async(app, user=target_user)
 
         session.clear()
         g._current_user = AnonymousUser()

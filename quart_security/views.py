@@ -58,15 +58,15 @@ def _resolve_redirect(config_key: str, fallback_endpoint: str) -> str:
 
 
 async def _find_user(**kwargs):
-    return await current_app.ensure_async(_security.datastore.find_user)(**kwargs)
+    return await _security.datastore.find_user(**kwargs)
 
 
 async def _create_user(**kwargs):
-    return await current_app.ensure_async(_security.datastore.create_user)(**kwargs)
+    return await _security.datastore.create_user(**kwargs)
 
 
 async def _commit():
-    await current_app.ensure_async(_security.datastore.commit)()
+    await _security.datastore.commit()
 
 
 async def _enforce_csrf(submitted_token: str | None = None):
@@ -146,22 +146,21 @@ def _pop_wan_state(key: str, max_age_seconds: int = 300) -> dict | None:
 async def _list_webauthn_credentials(user, usage: str | None = None):
     getter = getattr(_security.datastore, "get_webauthn_credentials", None)
     if getter:
-        credentials = await current_app.ensure_async(getter)(user, usage=usage)
-    else:
-        credentials = list(getattr(user, "webauthn", None) or [])
-        if usage:
-            credentials = [
-                credential
-                for credential in credentials
-                if getattr(credential, "usage", None) == usage
-            ]
+        return await getter(user, usage=usage)
+    credentials = list(getattr(user, "webauthn", None) or [])
+    if usage:
+        credentials = [
+            credential
+            for credential in credentials
+            if getattr(credential, "usage", None) == usage
+        ]
     return credentials
 
 
 async def _find_webauthn_credential(credential_id: bytes, user=None):
     finder = getattr(_security.datastore, "find_webauthn_credential", None)
     if finder:
-        return await current_app.ensure_async(finder)(credential_id, user=user)
+        return await finder(credential_id, user=user)
 
     candidates = list(getattr(user, "webauthn", None) or []) if user else []
     for credential in candidates:
@@ -173,14 +172,14 @@ async def _find_webauthn_credential(credential_id: bytes, user=None):
 async def _create_webauthn_credential(user, **kwargs):
     creator = getattr(_security.datastore, "create_webauthn_credential", None)
     if creator:
-        return await current_app.ensure_async(creator)(user, **kwargs)
+        return await creator(user, **kwargs)
     raise RuntimeError("Datastore does not implement create_webauthn_credential")
 
 
 async def _delete_webauthn_credential(user, credential):
     deleter = getattr(_security.datastore, "delete_webauthn_credential", None)
     if deleter:
-        return await current_app.ensure_async(deleter)(user, credential)
+        return await deleter(user, credential)
 
     user_credentials = getattr(user, "webauthn", None)
     if user_credentials is not None and credential in user_credentials:
@@ -313,7 +312,7 @@ async def register():
             user.confirmed_at = datetime.datetime.utcnow()
 
         await _commit()
-        user_registered.send(current_app._get_current_object(), user=user)
+        await user_registered.send_async(current_app._get_current_object(), user=user)
 
         await flash("Registration successful. Please log in.", "success")
         return redirect(_resolve_redirect("SECURITY_POST_REGISTER_VIEW", "login"))
@@ -375,7 +374,7 @@ async def change_password():
             user.password_set = True
 
         await _commit()
-        password_changed.send(current_app._get_current_object(), user=user)
+        await password_changed.send_async(current_app._get_current_object(), user=user)
 
         await flash("Password updated", "success")
         return redirect(url_for_security("change_password"))
@@ -416,7 +415,7 @@ async def two_factor_setup():
             current_user.tf_primary_method = None
             session.pop("tf_pending_secret", None)
             await _commit()
-            tf_profile_changed.send(
+            await tf_profile_changed.send_async(
                 current_app._get_current_object(), user=current_user
             )
             await flash("Two-factor authentication disabled.", "success")
@@ -442,7 +441,7 @@ async def two_factor_setup():
                         )
 
                 await _commit()
-                tf_profile_changed.send(
+                await tf_profile_changed.send_async(
                     current_app._get_current_object(), user=current_user
                 )
                 await flash("Two-factor authentication enabled.", "success")
@@ -554,7 +553,7 @@ async def mf_recovery_codes():
         codes = generate_recovery_codes(count)
         current_user.mf_recovery_codes = codes
         await _commit()
-        tf_profile_changed.send(current_app._get_current_object(), user=current_user)
+        await tf_profile_changed.send_async(current_app._get_current_object(), user=current_user)
         await flash("Recovery codes regenerated.", "success")
     elif request.args.get("show_codes"):
         codes = list(getattr(current_user, "mf_recovery_codes", None) or [])
