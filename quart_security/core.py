@@ -88,6 +88,10 @@ class Security:
             async def _security_load_user():
                 await self.load_user()
 
+            @app.before_websocket
+            async def _security_load_user_ws():
+                await self.load_user()
+
             app.extensions["quart_security_load_user_registered"] = True
 
         app.jinja_env.globals.setdefault("url_for_security", url_for_security)
