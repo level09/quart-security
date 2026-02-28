@@ -253,11 +253,30 @@ async def login():
 
     if _is_post() and form.validate():
         user = await _find_user(email=_normalize_email(form.email.data))
+
+        # Account lockout check
+        if user and hasattr(user, "locked_until") and user.locked_until:
+            if datetime.datetime.now() < user.locked_until:
+                await flash("Account temporarily locked. Try again later.", "error")
+                return await render_template(
+                    "security/login_user.html", login_user_form=form
+                )
+            # Lock expired, reset
+            user.failed_login_count = 0
+            user.locked_until = None
+            await _security.datastore.commit()
+
         if (
             user
             and getattr(user, "active", True)
             and verify_password(form.password.data, user.password)
         ):
+            # Reset failed attempts on success
+            if hasattr(user, "failed_login_count") and user.failed_login_count > 0:
+                user.failed_login_count = 0
+                user.locked_until = None
+                await _security.datastore.commit()
+
             if current_app.config.get("SECURITY_TWO_FACTOR") and getattr(
                 user, "tf_primary_method", None
             ):
@@ -266,6 +285,17 @@ async def login():
 
             await _security.login_user(user)
             return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
+
+        # Track failed login
+        if user and hasattr(user, "failed_login_count"):
+            user.failed_login_count = (user.failed_login_count or 0) + 1
+            max_attempts = current_app.config.get("SECURITY_LOGIN_MAX_ATTEMPTS", 5)
+            lockout_minutes = current_app.config.get("SECURITY_LOCKOUT_MINUTES", 15)
+            if user.failed_login_count >= max_attempts:
+                user.locked_until = datetime.datetime.now() + datetime.timedelta(
+                    minutes=lockout_minutes
+                )
+            await _security.datastore.commit()
 
         await flash("Invalid email or password", "error")
 
