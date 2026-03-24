@@ -21,10 +21,14 @@ def _authentication_options(challenge: bytes, credential_id: bytes):
 
 
 @pytest.mark.asyncio
-async def test_wan_register_creates_credential(client_webauthn, app_webauthn, monkeypatch):
+async def test_wan_register_creates_credential(
+    client_webauthn, app_webauthn, monkeypatch
+):
     user = app_webauthn.extensions["test_basic_user"]
 
-    async def fake_begin_registration(user, rp_id, rp_name, challenge, existing_credentials=None):
+    async def fake_begin_registration(
+        user, rp_id, rp_name, challenge, existing_credentials=None
+    ):
         return {"challenge": challenge}
 
     def fake_options_to_json_dict(options):
@@ -83,7 +87,9 @@ async def test_wan_register_creates_credential(client_webauthn, app_webauthn, mo
 
 
 @pytest.mark.asyncio
-async def test_wan_signin_logs_in_with_passkey(client_webauthn, app_webauthn, monkeypatch):
+async def test_wan_signin_logs_in_with_passkey(
+    client_webauthn, app_webauthn, monkeypatch
+):
     user = app_webauthn.extensions["test_basic_user"]
     user.fs_webauthn_user_handle = "handle-1"
     app_webauthn.extensions["test_datastore"].create_webauthn_credential(
@@ -146,7 +152,9 @@ async def test_wan_signin_logs_in_with_passkey(client_webauthn, app_webauthn, mo
 
 
 @pytest.mark.asyncio
-async def test_wan_verify_updates_sign_count(client_webauthn, app_webauthn, monkeypatch):
+async def test_wan_verify_updates_sign_count(
+    client_webauthn, app_webauthn, monkeypatch
+):
     user = app_webauthn.extensions["test_basic_user"]
     user.fs_webauthn_user_handle = "handle-2"
     app_webauthn.extensions["test_datastore"].create_webauthn_credential(

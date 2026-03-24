@@ -32,7 +32,7 @@ from .forms import (
 from .password import hash_password, validate_password, verify_password
 from .proxies import _security, current_user
 from .signals import password_changed, tf_profile_changed, user_registered
-from .utils import url_for_security
+from .utils import maybe_await, naive_utcnow, url_for_security
 
 security_bp = Blueprint("security", __name__, template_folder="templates")
 
@@ -58,15 +58,15 @@ def _resolve_redirect(config_key: str, fallback_endpoint: str) -> str:
 
 
 async def _find_user(**kwargs):
-    return await _security.datastore.find_user(**kwargs)
+    return await maybe_await(_security.datastore.find_user(**kwargs))
 
 
 async def _create_user(**kwargs):
-    return await _security.datastore.create_user(**kwargs)
+    return await maybe_await(_security.datastore.create_user(**kwargs))
 
 
 async def _commit():
-    await _security.datastore.commit()
+    await maybe_await(_security.datastore.commit())
 
 
 async def _enforce_csrf(submitted_token: str | None = None):
@@ -125,7 +125,7 @@ def _webauthn_rp_name() -> str:
 def _set_wan_state(key: str, **payload):
     session[key] = {
         "payload": payload,
-        "issued_at": int(datetime.datetime.utcnow().timestamp()),
+        "issued_at": int(naive_utcnow().timestamp()),
     }
 
 
@@ -137,7 +137,7 @@ def _pop_wan_state(key: str, max_age_seconds: int = 300) -> dict | None:
     payload = state.get("payload")
     if not isinstance(issued_at, int) or not isinstance(payload, dict):
         return None
-    age = int(datetime.datetime.utcnow().timestamp()) - issued_at
+    age = int(naive_utcnow().timestamp()) - issued_at
     if age < 0 or age > max_age_seconds:
         return None
     return payload
@@ -146,7 +146,7 @@ def _pop_wan_state(key: str, max_age_seconds: int = 300) -> dict | None:
 async def _list_webauthn_credentials(user, usage: str | None = None):
     getter = getattr(_security.datastore, "get_webauthn_credentials", None)
     if getter:
-        return await getter(user, usage=usage)
+        return await maybe_await(getter(user, usage=usage))
     credentials = list(getattr(user, "webauthn", None) or [])
     if usage:
         credentials = [
@@ -160,7 +160,7 @@ async def _list_webauthn_credentials(user, usage: str | None = None):
 async def _find_webauthn_credential(credential_id: bytes, user=None):
     finder = getattr(_security.datastore, "find_webauthn_credential", None)
     if finder:
-        return await finder(credential_id, user=user)
+        return await maybe_await(finder(credential_id, user=user))
 
     candidates = list(getattr(user, "webauthn", None) or []) if user else []
     for credential in candidates:
@@ -172,14 +172,14 @@ async def _find_webauthn_credential(credential_id: bytes, user=None):
 async def _create_webauthn_credential(user, **kwargs):
     creator = getattr(_security.datastore, "create_webauthn_credential", None)
     if creator:
-        return await creator(user, **kwargs)
+        return await maybe_await(creator(user, **kwargs))
     raise RuntimeError("Datastore does not implement create_webauthn_credential")
 
 
 async def _delete_webauthn_credential(user, credential):
     deleter = getattr(_security.datastore, "delete_webauthn_credential", None)
     if deleter:
-        return await deleter(user, credential)
+        return await maybe_await(deleter(user, credential))
 
     user_credentials = getattr(user, "webauthn", None)
     if user_credentials is not None and credential in user_credentials:
@@ -264,7 +264,7 @@ async def login():
             # Lock expired, reset
             user.failed_login_count = 0
             user.locked_until = None
-            await _security.datastore.commit()
+            await _commit()
 
         if (
             user
@@ -272,10 +272,13 @@ async def login():
             and verify_password(form.password.data, user.password)
         ):
             # Reset failed attempts on success
-            if hasattr(user, "failed_login_count") and user.failed_login_count > 0:
+            if (
+                hasattr(user, "failed_login_count")
+                and (user.failed_login_count or 0) > 0
+            ):
                 user.failed_login_count = 0
                 user.locked_until = None
-                await _security.datastore.commit()
+                await _commit()
 
             if current_app.config.get("SECURITY_TWO_FACTOR") and getattr(
                 user, "tf_primary_method", None
@@ -295,7 +298,7 @@ async def login():
                 user.locked_until = datetime.datetime.now() + datetime.timedelta(
                     minutes=lockout_minutes
                 )
-            await _security.datastore.commit()
+            await _commit()
 
         await flash("Invalid email or password", "error")
 
@@ -339,7 +342,7 @@ async def register():
 
         user = await _create_user(**user_kwargs)
         if hasattr(user, "confirmed_at"):
-            user.confirmed_at = datetime.datetime.utcnow()
+            user.confirmed_at = naive_utcnow()
 
         await _commit()
         await user_registered.send_async(current_app._get_current_object(), user=user)
@@ -459,16 +462,12 @@ async def two_factor_setup():
                 current_user.tf_primary_method = "authenticator"
                 session.pop("tf_pending_secret", None)
 
-                if current_app.config.get(
-                    "SECURITY_MULTI_FACTOR_RECOVERY_CODES", True
-                ):
+                if current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
                     if not getattr(current_user, "mf_recovery_codes", None):
                         count = current_app.config.get(
                             "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N", 3
                         )
-                        current_user.mf_recovery_codes = generate_recovery_codes(
-                            count
-                        )
+                        current_user.mf_recovery_codes = generate_recovery_codes(count)
 
                 await _commit()
                 await tf_profile_changed.send_async(
@@ -535,8 +534,10 @@ async def two_factor_token_validation():
         if token and getattr(user, "tf_totp_secret", None):
             valid = verify_totp(user.tf_totp_secret, token)
 
-        if not valid and token and current_app.config.get(
-            "SECURITY_MULTI_FACTOR_RECOVERY_CODES", True
+        if (
+            not valid
+            and token
+            and current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True)
         ):
             codes = list(getattr(user, "mf_recovery_codes", None) or [])
             ok, remaining = verify_recovery_code(token, codes)
@@ -583,7 +584,9 @@ async def mf_recovery_codes():
         codes = generate_recovery_codes(count)
         current_user.mf_recovery_codes = codes
         await _commit()
-        await tf_profile_changed.send_async(current_app._get_current_object(), user=current_user)
+        await tf_profile_changed.send_async(
+            current_app._get_current_object(), user=current_user
+        )
         await flash("Recovery codes regenerated.", "success")
     elif request.args.get("show_codes"):
         codes = list(getattr(current_user, "mf_recovery_codes", None) or [])
@@ -754,7 +757,7 @@ async def wan_register_response():
         usage=state.get("usage", "secondary"),
         backup_state=verification.get("backup_state", False),
         device_type=verification.get("device_type") or "single_device",
-        lastuse_datetime=datetime.datetime.utcnow(),
+        lastuse_datetime=naive_utcnow(),
     )
     await _commit()
 
@@ -878,7 +881,7 @@ async def wan_signin_response():
 
     stored_credential.sign_count = int(new_sign_count)
     if hasattr(stored_credential, "lastuse_datetime"):
-        stored_credential.lastuse_datetime = datetime.datetime.utcnow()
+        stored_credential.lastuse_datetime = naive_utcnow()
 
     session.permanent = bool(state.get("remember"))
     await _security.login_user(user)
@@ -960,7 +963,9 @@ async def wan_verify_response():
         await flash("Invalid passkey response payload.", "error")
         return redirect(url_for_security("wan_verify"))
 
-    stored_credential = await _find_webauthn_credential(credential_id, user=current_user)
+    stored_credential = await _find_webauthn_credential(
+        credential_id, user=current_user
+    )
     if stored_credential is None:
         await flash("Passkey not recognized.", "error")
         return redirect(url_for_security("wan_verify"))
@@ -982,7 +987,7 @@ async def wan_verify_response():
 
     stored_credential.sign_count = int(new_sign_count)
     if hasattr(stored_credential, "lastuse_datetime"):
-        stored_credential.lastuse_datetime = datetime.datetime.utcnow()
+        stored_credential.lastuse_datetime = naive_utcnow()
 
     session["_fresh"] = True
     await _commit()

@@ -28,6 +28,7 @@ It is designed as a practical replacement path for Flask-Security style session 
 - Flask-Security-style endpoint naming through `url_for_security()`
 - Signals for auth lifecycle events
 - Overridable templates under `templates/security/`
+- Datastore hooks can be implemented as async methods or simple sync methods
 
 ## Non-Goals (Current Scope)
 
@@ -103,6 +104,10 @@ For tracking / MFA / WebAuthn features:
 - `fs_webauthn_user_handle`
 - relationship/association for stored WebAuthn credentials
 
+Optional for lockout support:
+- `failed_login_count`
+- `locked_until`
+
 ## Key Configuration
 
 The extension uses `SECURITY_*` keys for migration-friendly configuration.
@@ -111,6 +116,8 @@ Core:
 - `SECURITY_PASSWORD_HASH` (default: `pbkdf2_sha512`)
 - `SECURITY_PASSWORD_SALT` (recommended)
 - `SECURITY_PASSWORD_LENGTH_MIN` (default: `12`)
+- `SECURITY_LOGIN_MAX_ATTEMPTS` (default: `5`)
+- `SECURITY_LOCKOUT_MINUTES` (default: `15`)
 - `SECURITY_REGISTERABLE`
 - `SECURITY_CHANGEABLE`
 - `SECURITY_TRACKABLE`

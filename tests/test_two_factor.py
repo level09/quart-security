@@ -39,9 +39,10 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
     assert post_response.headers["Location"].endswith("/mf-recovery-codes")
     assert user.tf_primary_method == "authenticator"
     assert user.tf_totp_secret == "test-secret"
-    assert len(user.mf_recovery_codes or []) == app_two_factor.config[
-        "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N"
-    ]
+    assert (
+        len(user.mf_recovery_codes or [])
+        == app_two_factor.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES_N"]
+    )
 
 
 @pytest.mark.asyncio

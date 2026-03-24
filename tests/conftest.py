@@ -47,6 +47,8 @@ class User(UserMixin):
     mf_recovery_codes: list[str] | None = None
     fs_webauthn_user_handle: str | None = None
     webauthn: list[WebAuthnCredential] = field(default_factory=list)
+    failed_login_count: int | None = None
+    locked_until: datetime.datetime | None = None
 
     @property
     def has_usable_password(self):

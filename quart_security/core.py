@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import secrets
 from datetime import timedelta
 
@@ -12,7 +11,7 @@ from .forms import ChangePasswordForm, LoginForm, RegisterForm
 from .password import init_password_context
 from .proxies import AnonymousUser, current_user
 from .signals import user_authenticated, user_logged_out
-from .utils import url_for_security
+from .utils import maybe_await, naive_utcnow, url_for_security
 
 
 class _SecurityConfig:
@@ -131,6 +130,8 @@ class Security:
             "SECURITY_WAN_REQUIRE_USER_VERIFICATION": True,
             "SECURITY_FRESHNESS": timedelta(minutes=60),
             "SECURITY_FRESHNESS_GRACE_PERIOD": timedelta(minutes=60),
+            "SECURITY_LOGIN_MAX_ATTEMPTS": 5,
+            "SECURITY_LOCKOUT_MINUTES": 15,
             "SECURITY_POST_LOGIN_VIEW": "/",
             "SECURITY_POST_REGISTER_VIEW": "/login",
             "SECURITY_EMAIL_SENDER": "noreply@example.com",
@@ -148,7 +149,7 @@ class Security:
             g._current_user = AnonymousUser()
             return
 
-        user = await self.datastore.find_user(fs_uniquifier=user_id)
+        user = await maybe_await(self.datastore.find_user(fs_uniquifier=user_id))
         g._current_user = user or AnonymousUser()
 
     async def login_user(self, user, fresh=True):
@@ -168,11 +169,11 @@ class Security:
         if app.config.get("SECURITY_TRACKABLE", True):
             user.last_login_at = getattr(user, "current_login_at", None)
             user.last_login_ip = getattr(user, "current_login_ip", None)
-            user.current_login_at = datetime.datetime.utcnow()
+            user.current_login_at = naive_utcnow()
             user.current_login_ip = request.remote_addr
             user.login_count = (getattr(user, "login_count", None) or 0) + 1
 
-        await self.datastore.commit()
+        await maybe_await(self.datastore.commit())
         await user_authenticated.send_async(app, user=user, authn_via="session")
 
     async def logout_user(self, user=None):

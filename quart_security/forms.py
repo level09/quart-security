@@ -63,7 +63,10 @@ class RegisterForm(QuartForm):
     password = PasswordField("Password", validators=[DataRequired()])
     password_confirm = PasswordField(
         "Confirm Password",
-        validators=[DataRequired(), EqualTo("password", message="Passwords must match")],
+        validators=[
+            DataRequired(),
+            EqualTo("password", message="Passwords must match"),
+        ],
     )
 
 
@@ -95,7 +98,10 @@ class WebAuthnRegisterForm(QuartForm):
     name = StringField("Credential Name", validators=[DataRequired()])
     usage = RadioField(
         "Usage",
-        choices=[("secondary", "Multi-factor only"), ("primary", "Passwordless sign-in")],
+        choices=[
+            ("secondary", "Multi-factor only"),
+            ("primary", "Passwordless sign-in"),
+        ],
         default="secondary",
         validators=[DataRequired()],
     )
