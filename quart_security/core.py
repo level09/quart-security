@@ -27,7 +27,6 @@ class _SecurityConfig:
         "webauthn": "SECURITY_WEBAUTHN",
         "wan_allow_as_first_factor": "SECURITY_WAN_ALLOW_AS_FIRST_FACTOR",
         "wan_allow_as_multi_factor": "SECURITY_WAN_ALLOW_AS_MULTI_FACTOR",
-        "wan_discoverable": "SECURITY_WAN_DISCOVERABLE",
         "support_mfa": "SECURITY_TWO_FACTOR",
         "multi_factor_recovery_codes": "SECURITY_MULTI_FACTOR_RECOVERY_CODES",
     }
@@ -129,7 +128,6 @@ class Security:
             "SECURITY_WAN_RP_NAME": None,
             "SECURITY_WAN_EXPECTED_ORIGIN": None,
             "SECURITY_WAN_REQUIRE_USER_VERIFICATION": True,
-            "SECURITY_WAN_DISCOVERABLE": True,
             "SECURITY_FRESHNESS": timedelta(minutes=60),
             "SECURITY_FRESHNESS_GRACE_PERIOD": timedelta(minutes=60),
             "SECURITY_LOGIN_MAX_ATTEMPTS": 5,

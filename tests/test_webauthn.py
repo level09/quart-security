@@ -13,13 +13,6 @@ def _registration_options(challenge: bytes, user_id: bytes = b"user-handle"):
     }
 
 
-def _authentication_options(challenge: bytes, credential_id: bytes):
-    return {
-        "challenge": wan.bytes_to_base64url(challenge),
-        "allowCredentials": [{"id": wan.bytes_to_base64url(credential_id)}],
-    }
-
-
 @pytest.mark.asyncio
 async def test_wan_register_creates_credential(
     client_webauthn, app_webauthn, monkeypatch
@@ -102,73 +95,6 @@ async def test_wan_signin_logs_in_with_passkey(
     )
 
     async def fake_begin_authentication(credentials, rp_id, challenge):
-        return {"challenge": challenge, "credential_id": credentials[0].credential_id}
-
-    def fake_options_to_json_dict(options):
-        return _authentication_options(options["challenge"], options["credential_id"])
-
-    async def fake_complete_authentication(
-        credential,
-        challenge,
-        rp_id,
-        expected_origin,
-        stored_credential,
-        require_user_verification=True,
-    ):
-        return stored_credential.sign_count + 1
-
-    monkeypatch.setattr(wan, "begin_authentication", fake_begin_authentication)
-    monkeypatch.setattr(wan, "options_to_json_dict", fake_options_to_json_dict)
-    monkeypatch.setattr(wan, "complete_authentication", fake_complete_authentication)
-
-    signin_start = await client_webauthn.post(
-        "/wan-signin",
-        form={"identity": "user@example.com", "remember": "y"},
-    )
-    assert signin_start.status_code == 200
-
-    credential_payload = {
-        "id": wan.bytes_to_base64url(b"cred-primary"),
-        "rawId": wan.bytes_to_base64url(b"cred-primary"),
-        "type": "public-key",
-        "response": {
-            "clientDataJSON": "client",
-            "authenticatorData": "auth-data",
-            "signature": "sig",
-            "userHandle": None,
-        },
-    }
-
-    signin_finish = await client_webauthn.post(
-        "/wan-signin-response",
-        form={"credential": json.dumps(credential_payload)},
-    )
-    assert signin_finish.status_code == 302
-    assert signin_finish.headers["Location"].endswith("/protected")
-
-    protected = await client_webauthn.get("/protected")
-    assert protected.status_code == 200
-    assert user.webauthn[0].sign_count == 2
-
-
-@pytest.mark.asyncio
-async def test_wan_signin_discoverable_flow(
-    client_webauthn, app_webauthn, monkeypatch
-):
-    """Passkey login without entering email (discoverable credentials)."""
-    user = app_webauthn.extensions["test_basic_user"]
-    user.fs_webauthn_user_handle = "handle-disc"
-    app_webauthn.extensions["test_datastore"].create_webauthn_credential(
-        user,
-        credential_id=b"cred-discoverable",
-        public_key=b"public-key",
-        sign_count=0,
-        name="Touch ID",
-        usage="primary",
-    )
-
-    async def fake_begin_authentication(credentials, rp_id, challenge):
-        # Discoverable flow: credentials list is empty
         return {"challenge": challenge, "allow_credentials": []}
 
     def fake_options_to_json_dict(options):
@@ -191,23 +117,21 @@ async def test_wan_signin_discoverable_flow(
     monkeypatch.setattr(wan, "options_to_json_dict", fake_options_to_json_dict)
     monkeypatch.setattr(wan, "complete_authentication", fake_complete_authentication)
 
-    # Submit with empty identity to trigger discoverable flow
     signin_start = await client_webauthn.post(
         "/wan-signin",
-        form={"identity": "", "remember": ""},
+        form={"identity": "", "remember": "y"},
     )
     assert signin_start.status_code == 200
 
-    # Simulate authenticator response with userHandle
     credential_payload = {
-        "id": wan.bytes_to_base64url(b"cred-discoverable"),
-        "rawId": wan.bytes_to_base64url(b"cred-discoverable"),
+        "id": wan.bytes_to_base64url(b"cred-primary"),
+        "rawId": wan.bytes_to_base64url(b"cred-primary"),
         "type": "public-key",
         "response": {
             "clientDataJSON": "client",
             "authenticatorData": "auth-data",
             "signature": "sig",
-            "userHandle": wan.bytes_to_base64url(b"handle-disc"),
+            "userHandle": wan.bytes_to_base64url(b"handle-1"),
         },
     }
 
@@ -220,7 +144,7 @@ async def test_wan_signin_discoverable_flow(
 
     protected = await client_webauthn.get("/protected")
     assert protected.status_code == 200
-    assert user.webauthn[0].sign_count == 1
+    assert user.webauthn[0].sign_count == 2
 
 
 @pytest.mark.asyncio
@@ -242,7 +166,12 @@ async def test_wan_verify_updates_sign_count(
         return {"challenge": challenge, "credential_id": credentials[0].credential_id}
 
     def fake_options_to_json_dict(options):
-        return _authentication_options(options["challenge"], options["credential_id"])
+        return {
+            "challenge": wan.bytes_to_base64url(options["challenge"]),
+            "allowCredentials": [
+                {"id": wan.bytes_to_base64url(options["credential_id"])}
+            ],
+        }
 
     async def fake_complete_authentication(
         credential,
