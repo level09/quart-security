@@ -26,7 +26,12 @@ def _require_webauthn():
             verify_authentication_response,
             verify_registration_response,
         )
-        from webauthn.helpers.structs import PublicKeyCredentialDescriptor
+        from webauthn.helpers.structs import (
+            AuthenticatorSelectionCriteria,
+            PublicKeyCredentialDescriptor,
+            ResidentKeyRequirement,
+            UserVerificationRequirement,
+        )
     except ImportError as exc:
         raise RuntimeError("webauthn package is required for WebAuthn support") from exc
 
@@ -37,6 +42,9 @@ def _require_webauthn():
         "verify_authentication_response": verify_authentication_response,
         "verify_registration_response": verify_registration_response,
         "PublicKeyCredentialDescriptor": PublicKeyCredentialDescriptor,
+        "AuthenticatorSelectionCriteria": AuthenticatorSelectionCriteria,
+        "ResidentKeyRequirement": ResidentKeyRequirement,
+        "UserVerificationRequirement": UserVerificationRequirement,
     }
 
 
@@ -59,6 +67,7 @@ async def begin_registration(
     rp_name,
     challenge: bytes,
     existing_credentials=None,
+    discoverable: bool = False,
 ):
     api = _require_webauthn()
 
@@ -72,15 +81,23 @@ async def begin_registration(
             api["PublicKeyCredentialDescriptor"](id=cred.credential_id)
         )
 
-    return api["generate_registration_options"](
-        rp_id=rp_id,
-        rp_name=rp_name,
-        challenge=challenge,
-        user_id=user_id,
-        user_name=getattr(user, "email", ""),
-        user_display_name=getattr(user, "name", None) or getattr(user, "email", ""),
-        exclude_credentials=exclude_credentials,
-    )
+    kwargs = {
+        "rp_id": rp_id,
+        "rp_name": rp_name,
+        "challenge": challenge,
+        "user_id": user_id,
+        "user_name": getattr(user, "email", ""),
+        "user_display_name": getattr(user, "name", None) or getattr(user, "email", ""),
+        "exclude_credentials": exclude_credentials,
+    }
+
+    if discoverable:
+        kwargs["authenticator_selection"] = api["AuthenticatorSelectionCriteria"](
+            resident_key=api["ResidentKeyRequirement"].REQUIRED,
+            user_verification=api["UserVerificationRequirement"].REQUIRED,
+        )
+
+    return api["generate_registration_options"](**kwargs)
 
 
 async def complete_registration(

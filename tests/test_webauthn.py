@@ -27,7 +27,7 @@ async def test_wan_register_creates_credential(
     user = app_webauthn.extensions["test_basic_user"]
 
     async def fake_begin_registration(
-        user, rp_id, rp_name, challenge, existing_credentials=None
+        user, rp_id, rp_name, challenge, existing_credentials=None, discoverable=False
     ):
         return {"challenge": challenge}
 
@@ -149,6 +149,78 @@ async def test_wan_signin_logs_in_with_passkey(
     protected = await client_webauthn.get("/protected")
     assert protected.status_code == 200
     assert user.webauthn[0].sign_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wan_signin_discoverable_flow(
+    client_webauthn, app_webauthn, monkeypatch
+):
+    """Passkey login without entering email (discoverable credentials)."""
+    user = app_webauthn.extensions["test_basic_user"]
+    user.fs_webauthn_user_handle = "handle-disc"
+    app_webauthn.extensions["test_datastore"].create_webauthn_credential(
+        user,
+        credential_id=b"cred-discoverable",
+        public_key=b"public-key",
+        sign_count=0,
+        name="Touch ID",
+        usage="primary",
+    )
+
+    async def fake_begin_authentication(credentials, rp_id, challenge):
+        # Discoverable flow: credentials list is empty
+        return {"challenge": challenge, "allow_credentials": []}
+
+    def fake_options_to_json_dict(options):
+        return {
+            "challenge": wan.bytes_to_base64url(options["challenge"]),
+            "allowCredentials": [],
+        }
+
+    async def fake_complete_authentication(
+        credential,
+        challenge,
+        rp_id,
+        expected_origin,
+        stored_credential,
+        require_user_verification=True,
+    ):
+        return stored_credential.sign_count + 1
+
+    monkeypatch.setattr(wan, "begin_authentication", fake_begin_authentication)
+    monkeypatch.setattr(wan, "options_to_json_dict", fake_options_to_json_dict)
+    monkeypatch.setattr(wan, "complete_authentication", fake_complete_authentication)
+
+    # Submit with empty identity to trigger discoverable flow
+    signin_start = await client_webauthn.post(
+        "/wan-signin",
+        form={"identity": "", "remember": ""},
+    )
+    assert signin_start.status_code == 200
+
+    # Simulate authenticator response with userHandle
+    credential_payload = {
+        "id": wan.bytes_to_base64url(b"cred-discoverable"),
+        "rawId": wan.bytes_to_base64url(b"cred-discoverable"),
+        "type": "public-key",
+        "response": {
+            "clientDataJSON": "client",
+            "authenticatorData": "auth-data",
+            "signature": "sig",
+            "userHandle": wan.bytes_to_base64url(b"handle-disc"),
+        },
+    }
+
+    signin_finish = await client_webauthn.post(
+        "/wan-signin-response",
+        form={"credential": json.dumps(credential_payload)},
+    )
+    assert signin_finish.status_code == 302
+    assert signin_finish.headers["Location"].endswith("/protected")
+
+    protected = await client_webauthn.get("/protected")
+    assert protected.status_code == 200
+    assert user.webauthn[0].sign_count == 1
 
 
 @pytest.mark.asyncio

@@ -124,7 +124,13 @@ class InMemoryDatastore:
         return credentials
 
     def find_webauthn_credential(self, credential_id, user=None):
-        candidates = self.get_webauthn_credentials(user) if user else []
+        if user is not None:
+            candidates = self.get_webauthn_credentials(user)
+        else:
+            # Global lookup across all users (discoverable credential flow)
+            candidates = [
+                cred for u in self.users for cred in (u.webauthn or [])
+            ]
         for credential in candidates:
             if credential.credential_id == credential_id:
                 return credential

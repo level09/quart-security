@@ -8,4 +8,7 @@
   {{ render_input(login_user_form.password, 'password') }}
   <button type="submit">Sign in</button>
 </form>
+{% if security.webauthn and security.wan_allow_as_first_factor %}
+<p><a href="{{ url_for_security('wan_signin') }}">Sign in with passkey</a></p>
+{% endif %}
 <p><a href="{{ url_for_security('register') }}">Create account</a></p>

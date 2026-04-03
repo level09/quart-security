@@ -200,6 +200,21 @@ def _extract_webauthn_credential_id(credential_payload: dict | None) -> bytes | 
         return None
 
 
+def _extract_webauthn_user_handle(credential_payload: dict | None) -> str | None:
+    if not isinstance(credential_payload, dict):
+        return None
+    response = credential_payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    user_handle = response.get("userHandle")
+    if not isinstance(user_handle, str) or not user_handle:
+        return None
+    try:
+        return wan.base64url_to_bytes(user_handle).decode("utf-8")
+    except Exception:
+        return None
+
+
 async def _extract_webauthn_credential_payload():
     payload = await request.get_json(silent=True)
     if isinstance(payload, dict):
@@ -689,6 +704,7 @@ async def wan_register():
             rp_name=_webauthn_rp_name(),
             challenge=challenge,
             existing_credentials=registered_credentials,
+            discoverable=(requested_usage == "primary"),
         )
         credential_options = wan.options_to_json_dict(options)
 
@@ -776,62 +792,77 @@ async def wan_signin():
     response_form = await QuartForm.from_formdata()
 
     credential_options = None
+    discoverable = False
+
     if _is_post():
         await _enforce_csrf(getattr(form, "_submitted_csrf", None))
         identity = _normalize_email(form.identity.data)
-        if not identity:
-            await flash("Email is required.", "error")
-            return await render_template(
-                "security/wan_signin.html",
-                wan_signin_form=form,
-                wan_signin_response_form=response_form,
-                credential_options=None,
-            )
 
-        user = await _find_user(email=identity)
-        if user is None or not getattr(user, "active", True):
-            await flash("Unable to authenticate with passkey.", "error")
-            return await render_template(
-                "security/wan_signin.html",
-                wan_signin_form=form,
-                wan_signin_response_form=response_form,
-                credential_options=None,
-            )
+        if identity:
+            # Email-first flow: scope allowCredentials to this user
+            user = await _find_user(email=identity)
+            if user is None or not getattr(user, "active", True):
+                await flash("Unable to authenticate with passkey.", "error")
+                return await render_template(
+                    "security/wan_signin.html",
+                    wan_signin_form=form,
+                    wan_signin_response_form=response_form,
+                    credential_options=None,
+                )
 
-        credentials = await _list_webauthn_credentials(user)
-        credentials = [
-            credential
-            for credential in credentials
-            if getattr(credential, "usage", "secondary") in {"primary", "first"}
-        ]
-        if not credentials:
-            await flash("No passkey is configured for passwordless sign-in.", "error")
-            return await render_template(
-                "security/wan_signin.html",
-                wan_signin_form=form,
-                wan_signin_response_form=response_form,
-                credential_options=None,
-            )
+            credentials = await _list_webauthn_credentials(user)
+            credentials = [
+                credential
+                for credential in credentials
+                if getattr(credential, "usage", "secondary") in {"primary", "first"}
+            ]
+            if not credentials:
+                await flash(
+                    "No passkey is configured for passwordless sign-in.", "error"
+                )
+                return await render_template(
+                    "security/wan_signin.html",
+                    wan_signin_form=form,
+                    wan_signin_response_form=response_form,
+                    credential_options=None,
+                )
 
-        challenge = secrets.token_bytes(32)
-        options = await wan.begin_authentication(
-            credentials,
-            rp_id=_webauthn_rp_id(),
-            challenge=challenge,
-        )
-        credential_options = wan.options_to_json_dict(options)
-        _set_wan_state(
-            "wan_signin_state",
-            challenge=wan.bytes_to_base64url(challenge),
-            user_id=user.get_id(),
-            remember=bool(form.remember.data),
-        )
+            challenge = secrets.token_bytes(32)
+            options = await wan.begin_authentication(
+                credentials,
+                rp_id=_webauthn_rp_id(),
+                challenge=challenge,
+            )
+            credential_options = wan.options_to_json_dict(options)
+            _set_wan_state(
+                "wan_signin_state",
+                challenge=wan.bytes_to_base64url(challenge),
+                user_id=user.get_id(),
+                remember=bool(form.remember.data),
+            )
+        else:
+            # Discoverable credential flow: empty allowCredentials
+            discoverable = True
+            challenge = secrets.token_bytes(32)
+            options = await wan.begin_authentication(
+                [],
+                rp_id=_webauthn_rp_id(),
+                challenge=challenge,
+            )
+            credential_options = wan.options_to_json_dict(options)
+            _set_wan_state(
+                "wan_signin_state",
+                challenge=wan.bytes_to_base64url(challenge),
+                user_id=None,
+                remember=bool(form.remember.data),
+            )
 
     return await render_template(
         "security/wan_signin.html",
         wan_signin_form=form,
         wan_signin_response_form=response_form,
         credential_options=credential_options,
+        discoverable=discoverable,
     )
 
 
@@ -848,18 +879,40 @@ async def wan_signin_response():
         await flash("Passkey sign-in expired. Please try again.", "error")
         return redirect(url_for_security("wan_signin"))
 
-    user = await _find_user(fs_uniquifier=state.get("user_id"))
-    if user is None:
-        await flash("Unable to find user for passkey sign-in.", "error")
-        return redirect(url_for_security("wan_signin"))
-
     credential_payload = await _extract_webauthn_credential_payload()
     credential_id = _extract_webauthn_credential_id(credential_payload)
     if not credential_payload or credential_id is None:
         await flash("Invalid passkey response payload.", "error")
         return redirect(url_for_security("wan_signin"))
 
-    stored_credential = await _find_webauthn_credential(credential_id, user=user)
+    user_id = state.get("user_id")
+    if user_id:
+        # Email-first flow: user was identified before challenge
+        user = await _find_user(fs_uniquifier=user_id)
+        if user is None:
+            await flash("Unable to find user for passkey sign-in.", "error")
+            return redirect(url_for_security("wan_signin"))
+        stored_credential = await _find_webauthn_credential(credential_id, user=user)
+    else:
+        # Discoverable flow: resolve user from credential
+        stored_credential = await _find_webauthn_credential(credential_id, user=None)
+        if stored_credential is None:
+            await flash("Passkey not recognized.", "error")
+            return redirect(url_for_security("wan_signin"))
+
+        # Find user via credential's user_id (fs_webauthn_user_handle)
+        credential_user_id = getattr(stored_credential, "user_id", None)
+        user_handle = _extract_webauthn_user_handle(credential_payload)
+        lookup_handle = credential_user_id or user_handle
+        if not lookup_handle:
+            await flash("Unable to identify user from passkey.", "error")
+            return redirect(url_for_security("wan_signin"))
+
+        user = await _find_user(fs_webauthn_user_handle=lookup_handle)
+        if user is None or not getattr(user, "active", True):
+            await flash("Unable to find user for passkey sign-in.", "error")
+            return redirect(url_for_security("wan_signin"))
+
     if stored_credential is None:
         await flash("Passkey not recognized.", "error")
         return redirect(url_for_security("wan_signin"))
