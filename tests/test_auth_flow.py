@@ -2,6 +2,8 @@ import datetime
 
 import pytest
 
+from quart_security.utils import naive_utcnow
+
 
 @pytest.mark.asyncio
 async def test_protected_redirects_to_login(client):
@@ -86,7 +88,7 @@ async def test_login_lockout_blocks_after_repeated_failures(client, app):
 async def test_login_lockout_resets_after_expiry(client, app):
     user = app.extensions["test_basic_user"]
     user.failed_login_count = 3
-    user.locked_until = datetime.datetime.now() - datetime.timedelta(minutes=1)
+    user.locked_until = naive_utcnow() - datetime.timedelta(minutes=1)
 
     response = await client.post(
         "/login",

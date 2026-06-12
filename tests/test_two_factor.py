@@ -1,6 +1,7 @@
 import pytest
 
 from quart_security import totp
+from quart_security.totp import verify_recovery_code
 
 
 @pytest.mark.asyncio
@@ -106,3 +107,25 @@ async def test_two_factor_recovery_code_login_consumes_code(
     assert recovery.status_code == 302
     assert recovery.headers["Location"].endswith("/protected")
     assert user.mf_recovery_codes == []
+
+
+def test_verify_recovery_code_constant_time_valid():
+    codes = ["ab12c-de34f", "fg56h-ij78k"]
+    ok, remaining = verify_recovery_code("ab12c-de34f", codes)
+    assert ok is True
+    assert remaining == ["fg56h-ij78k"]
+
+
+def test_verify_recovery_code_constant_time_invalid():
+    codes = ["ab12c-de34f", "fg56h-ij78k"]
+    ok, remaining = verify_recovery_code("zzzzz-zzzzz", codes)
+    assert ok is False
+    assert remaining == codes
+
+
+def test_verify_recovery_code_all_entries_checked():
+    """Verify the last code in the list is found (ensures no early exit skips it)."""
+    codes = ["ab12c-de34f", "fg56h-ij78k", "target-code1"]
+    ok, remaining = verify_recovery_code("targetcode1", codes)
+    assert ok is True
+    assert remaining == ["ab12c-de34f", "fg56h-ij78k"]

@@ -1,6 +1,7 @@
 import pytest
 
 from quart_security import verify_password
+from quart_security.views import _safe_redirect_target
 
 
 @pytest.mark.asyncio
@@ -127,3 +128,41 @@ async def test_change_password_skips_current_for_oauth_style_user(client, app):
     assert response.headers["Location"].endswith("/change")
     assert user.password_set is True
     assert verify_password("oauth-updated-123", user.password)
+
+
+@pytest.mark.asyncio
+async def test_session_fixation_pre_login_keys_cleared(client):
+    """Pre-login session state must not survive into the authenticated session."""
+    async with client.session_transaction() as sess:
+        sess["attacker_key"] = "injected"
+        sess["_csrf_token"] = "sometoken"
+
+    await client.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+
+    async with client.session_transaction() as sess:
+        assert "attacker_key" not in sess
+        assert "_user_id" in sess
+
+
+def test_safe_redirect_allows_good_paths():
+    assert _safe_redirect_target("/good") == "/good"
+    assert _safe_redirect_target("/good?next=x") == "/good?next=x"
+
+
+def test_safe_redirect_blocks_external():
+    assert _safe_redirect_target("//evil.com") == "/"
+    assert _safe_redirect_target("http://evil.com/path") == "/"
+    assert _safe_redirect_target("//evil.com/path") == "/"
+
+
+def test_safe_redirect_blocks_backslash():
+    assert _safe_redirect_target("/\\evil.com") == "/"
+    assert _safe_redirect_target("\\/\\/evil.com") == "/"
+
+
+def test_safe_redirect_blocks_control_chars():
+    assert _safe_redirect_target("/path\x00evil") == "/"
+    assert _safe_redirect_target("/path\nevil") == "/"

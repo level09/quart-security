@@ -128,9 +128,7 @@ class InMemoryDatastore:
             candidates = self.get_webauthn_credentials(user)
         else:
             # Global lookup across all users (discoverable credential flow)
-            candidates = [
-                cred for u in self.users for cred in (u.webauthn or [])
-            ]
+            candidates = [cred for u in self.users for cred in (u.webauthn or [])]
         for credential in candidates:
             if credential.credential_id == credential_id:
                 return credential

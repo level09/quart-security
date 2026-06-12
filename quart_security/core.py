@@ -118,7 +118,6 @@ class Security:
             "SECURITY_TRACKABLE": True,
             "SECURITY_TWO_FACTOR": True,
             "SECURITY_WEBAUTHN": True,
-            "SECURITY_TWO_FACTOR_ENABLED_METHODS": ["authenticator"],
             "SECURITY_TOTP_ISSUER": "Quart",
             "SECURITY_MULTI_FACTOR_RECOVERY_CODES": True,
             "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N": 3,
@@ -135,9 +134,7 @@ class Security:
             "SECURITY_POST_LOGIN_VIEW": "/",
             "SECURITY_POST_REGISTER_VIEW": "/login",
             "SECURITY_EMAIL_SENDER": "noreply@example.com",
-            "SECURITY_SEND_PASSWORD_CHANGE_EMAIL": False,
             "SECURITY_CSRF_PROTECT": True,
-            "SECURITY_API_ENABLED_METHODS": ["session"],
         }
 
         for key, value in defaults.items():
@@ -161,9 +158,13 @@ class Security:
         if not user_id:
             raise RuntimeError("User must have fs_uniquifier/get_id for session login")
 
+        # Regenerate session to prevent fixation: discard pre-login state,
+        # then write only the login keys into a clean session.
+        session.clear()
         session["_user_id"] = user_id
         session["_fresh"] = bool(fresh)
         session["_id"] = secrets.token_hex(16)
+        session.modified = True
         g._current_user = user
 
         if app.config.get("SECURITY_TRACKABLE", True):

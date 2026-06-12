@@ -54,8 +54,13 @@ def generate_recovery_codes(n: int = 3) -> list[str]:
 
 def verify_recovery_code(code: str, stored_codes: list[str]) -> tuple[bool, list[str]]:
     normalized = code.strip().lower().replace("-", "").replace(" ", "")
-    for stored in stored_codes:
-        if normalized == stored.replace("-", ""):
-            remaining = [item for item in stored_codes if item != stored]
-            return True, remaining
+    matched_index = -1
+    for i, stored in enumerate(stored_codes):
+        stored_normalized = stored.strip().lower().replace("-", "").replace(" ", "")
+        # compare_digest on every entry — no early exit
+        if secrets.compare_digest(normalized, stored_normalized):
+            matched_index = i
+    if matched_index >= 0:
+        remaining = [item for i, item in enumerate(stored_codes) if i != matched_index]
+        return True, remaining
     return False, stored_codes

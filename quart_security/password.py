@@ -1,5 +1,7 @@
 """Password hashing and validation helpers."""
 
+import asyncio
+
 from passlib.context import CryptContext
 
 _pwd_context: CryptContext | None = None
@@ -34,6 +36,14 @@ def verify_password(password: str, password_hash: str) -> bool:
     if _password_salt:
         return context.verify(f"{password}{_password_salt}", password_hash)
     return False
+
+
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash)
 
 
 def validate_password(password: str, min_length: int = 12) -> list[str]:

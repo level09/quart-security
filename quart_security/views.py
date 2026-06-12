@@ -29,7 +29,11 @@ from .forms import (
     WebAuthnRegisterForm,
     WebAuthnVerifyForm,
 )
-from .password import hash_password, validate_password, verify_password
+from .password import (
+    hash_password_async,
+    validate_password,
+    verify_password_async,
+)
 from .proxies import _security, current_user
 from .signals import password_changed, tf_profile_changed, user_registered
 from .utils import maybe_await, naive_utcnow, url_for_security
@@ -95,6 +99,13 @@ def _ensure_csrf_token() -> str:
 
 def _safe_redirect_target(candidate: str | None, fallback: str = "/") -> str:
     if not candidate:
+        return fallback
+    # Reject control characters (ASCII 0-31)
+    if any(ord(c) < 32 for c in candidate):
+        return fallback
+    # Reject backslash variants before any query string
+    path_part = candidate.split("?", 1)[0]
+    if "\\" in path_part:
         return fallback
     parts = urlsplit(candidate)
     if parts.scheme or parts.netloc:
@@ -271,7 +282,7 @@ async def login():
 
         # Account lockout check
         if user and hasattr(user, "locked_until") and user.locked_until:
-            if datetime.datetime.now() < user.locked_until:
+            if naive_utcnow() < user.locked_until:
                 await flash("Account temporarily locked. Try again later.", "error")
                 return await render_template(
                     "security/login_user.html", login_user_form=form
@@ -284,7 +295,7 @@ async def login():
         if (
             user
             and getattr(user, "active", True)
-            and verify_password(form.password.data, user.password)
+            and await verify_password_async(form.password.data, user.password)
         ):
             # Reset failed attempts on success
             if (
@@ -310,7 +321,7 @@ async def login():
             max_attempts = current_app.config.get("SECURITY_LOGIN_MAX_ATTEMPTS", 5)
             lockout_minutes = current_app.config.get("SECURITY_LOCKOUT_MINUTES", 15)
             if user.failed_login_count >= max_attempts:
-                user.locked_until = datetime.datetime.now() + datetime.timedelta(
+                user.locked_until = naive_utcnow() + datetime.timedelta(
                     minutes=lockout_minutes
                 )
             await _commit()
@@ -349,7 +360,7 @@ async def register():
 
         user_kwargs = {
             "email": email,
-            "password": hash_password(form.password.data),
+            "password": await hash_password_async(form.password.data),
             "active": True,
         }
         if hasattr(form, "name") and form.name.data:
@@ -395,7 +406,7 @@ async def change_password():
                 return await render_template(
                     "security/change_password.html", change_password_form=form
                 )
-            if not verify_password(current_password, user.password):
+            if not await verify_password_async(current_password, user.password):
                 await flash("Invalid current password", "error")
                 return await render_template(
                     "security/change_password.html", change_password_form=form
@@ -417,7 +428,7 @@ async def change_password():
                 "security/change_password.html", change_password_form=form
             )
 
-        user.password = hash_password(form.new_password.data)
+        user.password = await hash_password_async(form.new_password.data)
         if hasattr(user, "password_set"):
             user.password_set = True
 
@@ -753,7 +764,10 @@ async def wan_register_response():
                 "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
             ),
         )
-    except Exception:
+    except Exception as exc:
+        current_app.logger.warning(
+            "WebAuthn registration failed: %s: %s", type(exc).__name__, exc
+        )
         await flash("Passkey registration failed.", "error")
         return redirect(url_for_security("wan_register"))
 
@@ -868,7 +882,10 @@ async def wan_signin_response():
                 "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
             ),
         )
-    except Exception:
+    except Exception as exc:
+        current_app.logger.warning(
+            "WebAuthn sign-in failed: %s: %s", type(exc).__name__, exc
+        )
         await flash("Passkey verification failed.", "error")
         return redirect(url_for_security("wan_signin"))
 
@@ -974,7 +991,10 @@ async def wan_verify_response():
                 "SECURITY_WAN_REQUIRE_USER_VERIFICATION", True
             ),
         )
-    except Exception:
+    except Exception as exc:
+        current_app.logger.warning(
+            "WebAuthn verification failed: %s: %s", type(exc).__name__, exc
+        )
         await flash("Passkey verification failed.", "error")
         return redirect(url_for_security("wan_verify"))
 

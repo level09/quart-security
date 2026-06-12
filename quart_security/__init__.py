@@ -4,7 +4,12 @@ from .core import Security
 from .datastore import SQLAlchemyUserDatastore
 from .decorators import auth_required, roles_required
 from .models import RoleMixin, UserMixin
-from .password import hash_password, verify_password
+from .password import (
+    hash_password,
+    hash_password_async,
+    verify_password,
+    verify_password_async,
+)
 from .proxies import current_user
 from .signals import (
     password_changed,
@@ -23,7 +28,9 @@ __all__ = [
     "UserMixin",
     "RoleMixin",
     "hash_password",
+    "hash_password_async",
     "verify_password",
+    "verify_password_async",
     "current_user",
     "user_authenticated",
     "user_logged_out",
