@@ -20,6 +20,7 @@ from quart import (
 from werkzeug.routing import BuildError
 
 from . import webauthn as wan
+from .breach import password_is_breached
 from .decorators import auth_required
 from .forms import (
     QuartForm,
@@ -31,6 +32,7 @@ from .forms import (
 )
 from .password import (
     hash_password_async,
+    password_needs_rehash,
     validate_password,
     verify_password_async,
 )
@@ -297,6 +299,11 @@ async def login():
             and getattr(user, "active", True)
             and await verify_password_async(form.password.data, user.password)
         ):
+            # Transparent rehash: upgrade weak/legacy hash on successful login
+            if password_needs_rehash(user.password):
+                user.password = await hash_password_async(form.password.data)
+                await _commit()
+
             # Reset failed attempts on success
             if (
                 hasattr(user, "failed_login_count")
@@ -357,6 +364,21 @@ async def register():
             return await render_template(
                 "security/register_user.html", register_user_form=form
             )
+
+        if current_app.config.get("SECURITY_PASSWORD_BREACH_CHECK", True):
+            count_min = current_app.config.get("SECURITY_PASSWORD_BREACH_COUNT_MIN", 1)
+            breached = await password_is_breached(
+                form.password.data, count_min=count_min
+            )
+            if breached:
+                await flash(
+                    "This password has appeared in a data breach."
+                    " Choose a different one.",
+                    "error",
+                )
+                return await render_template(
+                    "security/register_user.html", register_user_form=form
+                )
 
         user_kwargs = {
             "email": email,
@@ -427,6 +449,21 @@ async def change_password():
             return await render_template(
                 "security/change_password.html", change_password_form=form
             )
+
+        if current_app.config.get("SECURITY_PASSWORD_BREACH_CHECK", True):
+            count_min = current_app.config.get("SECURITY_PASSWORD_BREACH_COUNT_MIN", 1)
+            breached = await password_is_breached(
+                form.new_password.data, count_min=count_min
+            )
+            if breached:
+                await flash(
+                    "This password has appeared in a data breach."
+                    " Choose a different one.",
+                    "error",
+                )
+                return await render_template(
+                    "security/change_password.html", change_password_form=form
+                )
 
         user.password = await hash_password_async(form.new_password.data)
         if hasattr(user, "password_set"):

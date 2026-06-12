@@ -113,15 +113,20 @@ Optional for lockout support:
 The extension uses `SECURITY_*` keys for migration-friendly configuration.
 
 Core:
-- `SECURITY_PASSWORD_HASH` (default: `pbkdf2_sha512`)
+- `SECURITY_PASSWORD_HASH` (default: `argon2` / argon2id; set to `pbkdf2_sha512` to keep old behavior)
 - `SECURITY_PASSWORD_SALT` (recommended)
 - `SECURITY_PASSWORD_LENGTH_MIN` (default: `12`)
+- `SECURITY_PASSWORD_BREACH_CHECK` (default: `True`) - HIBP k-anonymity check on register/change
+- `SECURITY_PASSWORD_BREACH_COUNT_MIN` (default: `1`) - minimum breach count to reject
+- `SECURITY_ARGON2_MEMORY_COST` / `SECURITY_ARGON2_TIME_COST` / `SECURITY_ARGON2_PARALLELISM` - override argon2 params (production defaults: 19456/2/1)
 - `SECURITY_LOGIN_MAX_ATTEMPTS` (default: `5`)
 - `SECURITY_LOCKOUT_MINUTES` (default: `15`)
 - `SECURITY_REGISTERABLE`
 - `SECURITY_CHANGEABLE`
 - `SECURITY_TRACKABLE`
 - `SECURITY_CSRF_PROTECT` (default: `True`)
+
+Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
 
 2FA:
 - `SECURITY_TWO_FACTOR`

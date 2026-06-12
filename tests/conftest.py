@@ -168,6 +168,12 @@ def _build_app(
         SECURITY_CHANGEABLE=True,
         SECURITY_TWO_FACTOR=two_factor,
         SECURITY_WEBAUTHN=webauthn,
+        # Low-cost argon2 params for fast tests (OWASP min used in production)
+        SECURITY_ARGON2_MEMORY_COST=64,
+        SECURITY_ARGON2_TIME_COST=1,
+        SECURITY_ARGON2_PARALLELISM=1,
+        # Disable breach check by default; individual tests opt in via respx mocks
+        SECURITY_PASSWORD_BREACH_CHECK=False,
     )
 
     Security(app, datastore)

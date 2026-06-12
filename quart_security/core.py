@@ -111,7 +111,9 @@ class Security:
     @staticmethod
     def _load_defaults(app):
         defaults = {
-            "SECURITY_PASSWORD_HASH": "pbkdf2_sha512",
+            "SECURITY_PASSWORD_HASH": "argon2",
+            "SECURITY_PASSWORD_BREACH_CHECK": True,
+            "SECURITY_PASSWORD_BREACH_COUNT_MIN": 1,
             "SECURITY_PASSWORD_LENGTH_MIN": 12,
             "SECURITY_REGISTERABLE": True,
             "SECURITY_CHANGEABLE": True,
