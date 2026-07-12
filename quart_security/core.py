@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 from datetime import timedelta
 
 from quart import current_app, g, request, session
@@ -149,7 +150,11 @@ class Security:
             return
 
         user = await maybe_await(self.datastore.find_user(fs_uniquifier=user_id))
-        g._current_user = user or AnonymousUser()
+        if user is None or not getattr(user, "active", True):
+            session.clear()
+            g._current_user = AnonymousUser()
+            return
+        g._current_user = user
 
     async def login_user(self, user, fresh=True):
         app = current_app._get_current_object()
@@ -165,6 +170,7 @@ class Security:
         session.clear()
         session["_user_id"] = user_id
         session["_fresh"] = bool(fresh)
+        session["_auth_at"] = int(time.time())
         session["_id"] = secrets.token_hex(16)
         session.modified = True
         g._current_user = user

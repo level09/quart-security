@@ -75,6 +75,29 @@ async def _commit():
     await maybe_await(_security.datastore.commit())
 
 
+def _account_is_locked(user) -> bool:
+    locked_until = getattr(user, "locked_until", None)
+    return bool(locked_until and naive_utcnow() < locked_until)
+
+
+async def _record_auth_failure(user):
+    if not hasattr(user, "failed_login_count"):
+        return
+    user.failed_login_count = (user.failed_login_count or 0) + 1
+    max_attempts = current_app.config.get("SECURITY_LOGIN_MAX_ATTEMPTS", 5)
+    if user.failed_login_count >= max_attempts:
+        minutes = current_app.config.get("SECURITY_LOCKOUT_MINUTES", 15)
+        user.locked_until = naive_utcnow() + datetime.timedelta(minutes=minutes)
+    await _commit()
+
+
+async def _reset_auth_failures(user):
+    if hasattr(user, "failed_login_count"):
+        user.failed_login_count = 0
+        user.locked_until = None
+        await _commit()
+
+
 async def _enforce_csrf(submitted_token: str | None = None):
     if not _is_post():
         return
@@ -180,6 +203,19 @@ async def _find_webauthn_credential(credential_id: bytes, user=None):
         if getattr(credential, "credential_id", None) == credential_id:
             return credential
     return None
+
+
+async def _find_webauthn_credential_owner(credential):
+    finder = getattr(_security.datastore, "find_user_for_webauthn_credential", None)
+    if finder:
+        return await maybe_await(finder(credential))
+    related_user = getattr(credential, "user", None)
+    if related_user is not None:
+        return related_user
+    owner_id = getattr(credential, "user_id", None)
+    if owner_id is None:
+        return None
+    return await _find_user(fs_webauthn_user_handle=owner_id)
 
 
 async def _create_webauthn_credential(user, **kwargs):
@@ -304,34 +340,22 @@ async def login():
                 user.password = await hash_password_async(form.password.data)
                 await _commit()
 
-            # Reset failed attempts on success
-            if (
-                hasattr(user, "failed_login_count")
-                and (user.failed_login_count or 0) > 0
-            ):
-                user.failed_login_count = 0
-                user.locked_until = None
-                await _commit()
-
             if current_app.config.get("SECURITY_TWO_FACTOR") and getattr(
                 user, "tf_primary_method", None
             ):
-                session["tf_user_id"] = user.get_id()
+                session["tf_user_id"] = {
+                    "user_id": user.get_id(),
+                    "issued_at": int(naive_utcnow().timestamp()),
+                }
                 return redirect(url_for_security("two_factor_token_validation"))
 
+            await _reset_auth_failures(user)
             await _security.login_user(user)
             return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
 
         # Track failed login
-        if user and hasattr(user, "failed_login_count"):
-            user.failed_login_count = (user.failed_login_count or 0) + 1
-            max_attempts = current_app.config.get("SECURITY_LOGIN_MAX_ATTEMPTS", 5)
-            lockout_minutes = current_app.config.get("SECURITY_LOCKOUT_MINUTES", 15)
-            if user.failed_login_count >= max_attempts:
-                user.locked_until = naive_utcnow() + datetime.timedelta(
-                    minutes=lockout_minutes
-                )
-            await _commit()
+        if user:
+            await _record_auth_failure(user)
 
         await flash("Invalid email or password", "error")
 
@@ -401,15 +425,16 @@ async def register():
     return await render_template("security/register_user.html", register_user_form=form)
 
 
-@security_bp.route("/logout", methods=["GET", "POST"])
+@security_bp.route("/logout", methods=["POST"])
 async def logout():
+    await _enforce_csrf()
     await _security.logout_user()
     await flash("You have been logged out.", "info")
     return redirect(url_for_security("login"))
 
 
 @security_bp.route("/change", methods=["GET", "POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def change_password():
     if not current_app.config.get("SECURITY_CHANGEABLE", False):
         abort(404)
@@ -486,7 +511,7 @@ async def change_password():
 
 
 @security_bp.route("/tf-setup", methods=["GET", "POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def two_factor_setup():
     if not current_app.config.get("SECURITY_TWO_FACTOR", False):
         abort(404)
@@ -496,6 +521,7 @@ async def two_factor_setup():
         generate_recovery_codes,
         generate_totp_secret,
         get_totp_uri,
+        hash_recovery_codes,
         verify_totp,
     )
 
@@ -525,19 +551,29 @@ async def two_factor_setup():
                 current_user.tf_primary_method = "authenticator"
                 session.pop("tf_pending_secret", None)
 
+                raw_codes = []
                 if current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
                     if not getattr(current_user, "mf_recovery_codes", None):
                         count = current_app.config.get(
                             "SECURITY_MULTI_FACTOR_RECOVERY_CODES_N", 3
                         )
-                        current_user.mf_recovery_codes = generate_recovery_codes(count)
+                        raw_codes = generate_recovery_codes(count)
+                        current_user.mf_recovery_codes = hash_recovery_codes(
+                            raw_codes, current_app.secret_key
+                        )
 
                 await _commit()
                 await tf_profile_changed.send_async(
                     current_app._get_current_object(), user=current_user
                 )
                 await flash("Two-factor authentication enabled.", "success")
-                return redirect(url_for_security("mf_recovery_codes"))
+                recovery_form = await QuartForm.from_formdata()
+                return await render_template(
+                    "security/mf_recovery_codes.html",
+                    recovery_codes=raw_codes,
+                    has_codes=True,
+                    mf_recovery_codes_form=recovery_form,
+                )
 
             await flash("Invalid authentication code.", "error")
             return redirect(
@@ -576,17 +612,32 @@ async def two_factor_token_validation():
     if not current_app.config.get("SECURITY_TWO_FACTOR", False):
         abort(404)
 
-    from .totp import verify_recovery_code, verify_totp
+    from .totp import (
+        ensure_hashed_recovery_codes,
+        verify_recovery_code,
+        verify_totp,
+    )
 
     form = await TwoFactorVerifyForm.from_formdata()
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
-    user_id = session.get("tf_user_id")
+    tf_state = session.get("tf_user_id")
+    if isinstance(tf_state, dict):
+        if int(naive_utcnow().timestamp()) - tf_state.get("issued_at", 0) > 300:
+            session.pop("tf_user_id", None)
+            return redirect(url_for_security("login"))
+        user_id = tf_state.get("user_id")
+    else:
+        session.pop("tf_user_id", None)
+        return redirect(url_for_security("login"))
     if not user_id:
         return redirect(url_for_security("login"))
 
     user = await _find_user(fs_uniquifier=user_id)
     if user is None:
         session.pop("tf_user_id", None)
+        return redirect(url_for_security("login"))
+    if _account_is_locked(user):
+        await flash("Account temporarily locked. Try again later.", "error")
         return redirect(url_for_security("login"))
 
     if _is_post():
@@ -603,17 +654,23 @@ async def two_factor_token_validation():
             and current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True)
         ):
             codes = list(getattr(user, "mf_recovery_codes", None) or [])
-            ok, remaining = verify_recovery_code(token, codes)
+            ok, remaining = verify_recovery_code(
+                token, codes, secret_key=current_app.secret_key
+            )
             if ok:
-                user.mf_recovery_codes = remaining
+                user.mf_recovery_codes = ensure_hashed_recovery_codes(
+                    remaining, current_app.secret_key
+                )
                 await _commit()
                 valid = True
 
         if valid:
             session.pop("tf_user_id", None)
+            await _reset_auth_failures(user)
             await _security.login_user(user)
             return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
 
+        await _record_auth_failure(user)
         await flash("Invalid code", "error")
 
     return await render_template(
@@ -630,12 +687,12 @@ async def tf_select():
 
 
 @security_bp.route("/mf-recovery-codes", methods=["GET", "POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def mf_recovery_codes():
     if not current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
         abort(404)
 
-    from .totp import generate_recovery_codes
+    from .totp import generate_recovery_codes, hash_recovery_codes
 
     # A dummy form just for hidden_tag() CSRF support
     form = await QuartForm.from_formdata()
@@ -645,14 +702,14 @@ async def mf_recovery_codes():
         await _enforce_csrf()
         count = current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES_N", 3)
         codes = generate_recovery_codes(count)
-        current_user.mf_recovery_codes = codes
+        current_user.mf_recovery_codes = hash_recovery_codes(
+            codes, current_app.secret_key
+        )
         await _commit()
         await tf_profile_changed.send_async(
             current_app._get_current_object(), user=current_user
         )
         await flash("Recovery codes regenerated.", "success")
-    elif request.args.get("show_codes"):
-        codes = list(getattr(current_user, "mf_recovery_codes", None) or [])
 
     has_codes = bool(getattr(current_user, "mf_recovery_codes", None))
 
@@ -670,33 +727,49 @@ async def mf_recovery():
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
 
     if _is_post() and form.validate():
-        user_id = session.get("tf_user_id")
+        tf_state = session.get("tf_user_id")
+        if not isinstance(tf_state, dict):
+            session.pop("tf_user_id", None)
+            return redirect(url_for_security("login"))
+        issued_at = tf_state.get("issued_at", 0)
+        if int(naive_utcnow().timestamp()) - issued_at > 300:
+            session.pop("tf_user_id", None)
+            return redirect(url_for_security("login"))
+        user_id = tf_state.get("user_id")
         if not user_id:
             return redirect(url_for_security("login"))
 
         user = await _find_user(fs_uniquifier=user_id)
         if user is None:
             return redirect(url_for_security("login"))
+        if _account_is_locked(user):
+            return redirect(url_for_security("login"))
 
-        from .totp import verify_recovery_code
+        from .totp import ensure_hashed_recovery_codes, verify_recovery_code
 
         ok, remaining = verify_recovery_code(
-            form.code.data.strip(), list(getattr(user, "mf_recovery_codes", None) or [])
+            form.code.data.strip(),
+            list(getattr(user, "mf_recovery_codes", None) or []),
+            secret_key=current_app.secret_key,
         )
         if ok:
-            user.mf_recovery_codes = remaining
+            user.mf_recovery_codes = ensure_hashed_recovery_codes(
+                remaining, current_app.secret_key
+            )
             await _commit()
             session.pop("tf_user_id", None)
+            await _reset_auth_failures(user)
             await _security.login_user(user)
             return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
 
+        await _record_auth_failure(user)
         await flash("Invalid recovery code", "error")
 
     return await render_template("security/mf_recovery.html", recovery_form=form)
 
 
 @security_bp.route("/wan-register", methods=["GET", "POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def wan_register():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
@@ -857,7 +930,6 @@ async def wan_signin():
         _set_wan_state(
             "wan_signin_state",
             challenge=wan.bytes_to_base64url(challenge),
-            remember=bool(form.remember.data),
         )
 
     return await render_template(
@@ -892,16 +964,17 @@ async def wan_signin_response():
         await flash("Passkey not recognized.", "error")
         return redirect(url_for_security("wan_signin"))
 
-    credential_user_id = getattr(stored_credential, "user_id", None)
     user_handle = _extract_webauthn_user_handle(credential_payload)
-    lookup_handle = credential_user_id or user_handle
-    if not lookup_handle:
+    user = await _find_webauthn_credential_owner(stored_credential)
+    if user is None:
         await flash("Unable to identify user from passkey.", "error")
         return redirect(url_for_security("wan_signin"))
 
-    user = await _find_user(fs_webauthn_user_handle=lookup_handle)
-    if user is None or not getattr(user, "active", True):
+    if not getattr(user, "active", True):
         await flash("Unable to find user for passkey sign-in.", "error")
+        return redirect(url_for_security("wan_signin"))
+    if user_handle and user_handle != user.fs_webauthn_user_handle:
+        await flash("Passkey user handle mismatch.", "error")
         return redirect(url_for_security("wan_signin"))
 
     if stored_credential is None:
@@ -930,7 +1003,6 @@ async def wan_signin_response():
     if hasattr(stored_credential, "lastuse_datetime"):
         stored_credential.lastuse_datetime = naive_utcnow()
 
-    session.permanent = bool(state.get("remember"))
     await _security.login_user(user)
     return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
 
@@ -1047,7 +1119,7 @@ async def wan_verify_response():
 
 
 @security_bp.route("/wan-delete", methods=["POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def wan_delete():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)

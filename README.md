@@ -108,6 +108,10 @@ Optional for lockout support:
 - `failed_login_count`
 - `locked_until`
 
+These fields are required when login or MFA lockout is enabled. The built-in
+counter limits account-level guesses. Deploy an application or edge rate limiter
+for source IP and distributed abuse controls.
+
 ## Key Configuration
 
 The extension uses `SECURITY_*` keys for migration-friendly configuration.
@@ -125,6 +129,7 @@ Core:
 - `SECURITY_CHANGEABLE`
 - `SECURITY_TRACKABLE`
 - `SECURITY_CSRF_PROTECT` (default: `True`)
+- `SECURITY_FRESHNESS` (default: `60` minutes)
 
 Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
 
@@ -133,6 +138,10 @@ Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 def
 - `SECURITY_TOTP_ISSUER`
 - `SECURITY_MULTI_FACTOR_RECOVERY_CODES`
 - `SECURITY_MULTI_FACTOR_RECOVERY_CODES_N`
+
+Recovery codes are displayed only when generated and are stored as keyed hashes.
+Existing plaintext codes remain valid until their next successful use, when the
+remaining codes are migrated.
 
 WebAuthn:
 - `SECURITY_WEBAUTHN`
@@ -152,7 +161,7 @@ Routing:
 Core:
 - `/login`
 - `/register`
-- `/logout`
+- `/logout` (POST only)
 - `/change`
 
 2FA:

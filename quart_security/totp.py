@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import io
 import secrets
 
@@ -52,13 +54,55 @@ def generate_recovery_codes(n: int = 3) -> list[str]:
     return codes
 
 
-def verify_recovery_code(code: str, stored_codes: list[str]) -> tuple[bool, list[str]]:
+_RECOVERY_HASH_PREFIX = "hmac-sha256$"
+
+
+def _normalize_recovery_code(code: str) -> str:
+    return code.strip().lower().replace("-", "").replace(" ", "")
+
+
+def _recovery_digest(code: str, secret_key: bytes | str) -> str:
+    if isinstance(secret_key, str):
+        secret_key = secret_key.encode()
+    digest = hmac.new(
+        secret_key, _normalize_recovery_code(code).encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{_RECOVERY_HASH_PREFIX}{digest}"
+
+
+def hash_recovery_codes(codes: list[str], secret_key: bytes | str) -> list[str]:
+    return [_recovery_digest(code, secret_key) for code in codes]
+
+
+def ensure_hashed_recovery_codes(
+    codes: list[str], secret_key: bytes | str
+) -> list[str]:
+    return [
+        code if is_hashed_recovery_code(code) else _recovery_digest(code, secret_key)
+        for code in codes
+    ]
+
+
+def is_hashed_recovery_code(code: str) -> bool:
+    return code.startswith(_RECOVERY_HASH_PREFIX)
+
+
+def verify_recovery_code(
+    code: str, stored_codes: list[str], *, secret_key: bytes | str = b""
+) -> tuple[bool, list[str]]:
     normalized = code.strip().lower().replace("-", "").replace(" ", "")
+    submitted_hash = _recovery_digest(code, secret_key)
     matched_index = -1
     for i, stored in enumerate(stored_codes):
-        stored_normalized = stored.strip().lower().replace("-", "").replace(" ", "")
+        stored_normalized = _normalize_recovery_code(stored)
         # compare_digest on every entry — no early exit
-        if secrets.compare_digest(normalized, stored_normalized):
+        matches_plaintext = not is_hashed_recovery_code(
+            stored
+        ) and secrets.compare_digest(normalized, stored_normalized)
+        matches_hash = is_hashed_recovery_code(stored) and secrets.compare_digest(
+            submitted_hash, stored
+        )
+        if matches_plaintext or matches_hash:
             matched_index = i
     if matched_index >= 0:
         remaining = [item for i, item in enumerate(stored_codes) if i != matched_index]

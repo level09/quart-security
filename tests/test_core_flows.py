@@ -56,7 +56,7 @@ async def test_logout_clears_session(client):
     protected_before = await client.get("/protected")
     assert protected_before.status_code == 200
 
-    logout_response = await client.get("/logout")
+    logout_response = await client.post("/logout")
     assert logout_response.status_code == 302
     assert "/login" in logout_response.headers["Location"]
 
@@ -89,7 +89,7 @@ async def test_change_password_requires_current_for_standard_user(client, app):
     assert user.password != old_hash
     assert verify_password("updated-password-123", user.password)
 
-    await client.get("/logout")
+    await client.post("/logout")
 
     invalid_login = await client.post(
         "/login",
@@ -145,6 +145,55 @@ async def test_session_fixation_pre_login_keys_cleared(client):
     async with client.session_transaction() as sess:
         assert "attacker_key" not in sess
         assert "_user_id" in sess
+
+
+@pytest.mark.asyncio
+async def test_inactive_user_session_is_revoked(client, app):
+    await client.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    app.extensions["test_basic_user"].active = False
+
+    response = await client.get("/protected")
+
+    assert response.status_code == 302
+    async with client.session_transaction() as sess:
+        assert "_user_id" not in sess
+
+
+@pytest.mark.asyncio
+async def test_logout_rejects_get(client):
+    response = await client.get("/logout")
+    assert response.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_logout_requires_valid_csrf(client, app):
+    app.config["SECURITY_CSRF_PROTECT"] = True
+    async with client.session_transaction() as sess:
+        sess["_user_id"] = "user-1"
+        sess["_csrf_token"] = "valid-token"
+
+    rejected = await client.post("/logout")
+    accepted = await client.post("/logout", form={"csrf_token": "valid-token"})
+
+    assert rejected.status_code == 400
+    assert accepted.status_code == 302
+
+
+@pytest.mark.asyncio
+async def test_stale_session_cannot_change_mfa(client_two_factor):
+    await client_two_factor.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    async with client_two_factor.session_transaction() as sess:
+        sess["_auth_at"] = 0
+
+    response = await client_two_factor.get("/tf-setup")
+
+    assert response.status_code == 401
 
 
 def test_safe_redirect_allows_good_paths():

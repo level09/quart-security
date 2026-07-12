@@ -109,5 +109,4 @@ class WebAuthnRegisterForm(QuartForm):
 
 class WebAuthnVerifyForm(QuartForm):
     identity = StringField("Email", validators=[Optional()])
-    remember = BooleanField("Remember me")
     credential = StringField("Credential", validators=[Optional()])

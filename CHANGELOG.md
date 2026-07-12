@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.1] - 2026-07-12
+
+### Security
+
+- Revoke authenticated sessions when an account is deactivated.
+- Bind discoverable WebAuthn signin to the credential owner stored by the
+  server instead of allowing the assertion user handle to select an account.
+- Apply account lockout counters and a five-minute expiry to pending MFA
+  verification.
+- Store new recovery codes as keyed hashes and migrate remaining legacy
+  plaintext codes after successful use.
+- Require fresh authentication for MFA and passkey management.
+- Require POST and CSRF validation for logout.
+
+### Fixed
+
+- Reuse factory-created SQLAlchemy sessions through commit so writes and their
+  transactions use the same session.
+- Render a valid CSRF token in the default recovery-code form.
+- Display raw recovery codes only in the response that generates them.
+- Remove the unsupported WebAuthn remember-me field.
+
 ## [1.4.0] - 2026-06-12
 
 ### Added

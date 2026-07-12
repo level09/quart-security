@@ -241,3 +241,9 @@ async def test_wan_delete_removes_credential(client_webauthn, app_webauthn):
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/wan-register")
     assert user.webauthn == []
+
+
+def test_webauthn_verify_form_has_no_remember_field():
+    from quart_security.forms import WebAuthnVerifyForm
+
+    assert "remember" not in WebAuthnVerifyForm()._fields

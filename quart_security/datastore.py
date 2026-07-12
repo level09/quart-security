@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -15,10 +16,19 @@ class SQLAlchemyUserDatastore:
         self.user_model = user_model
         self.role_model = role_model
         self.webauthn_model = webauthn_model
+        self._active_session = ContextVar("quart_security_session", default=None)
 
     @property
     def session(self):
-        return self.session_factory()
+        source = self.session_factory
+        configured = getattr(source, "session", None)
+        if configured is not None:
+            return configured
+        active = self._active_session.get()
+        if active is None:
+            active = source() if callable(source) else source
+            self._active_session.set(active)
+        return active
 
     async def _first(self, model, **kwargs):
         stmt = select(model).filter_by(**kwargs)
@@ -130,6 +140,18 @@ class SQLAlchemyUserDatastore:
                 return credential
         return None
 
+    async def find_user_for_webauthn_credential(self, credential):
+        related_user = getattr(credential, "user", None)
+        if related_user is not None:
+            return related_user
+        owner_id = getattr(credential, "user_id", None)
+        if owner_id is None:
+            return None
+        user = await self.find_user(fs_webauthn_user_handle=owner_id)
+        if user is None and hasattr(self.user_model, "id"):
+            user = await self.find_user(id=owner_id)
+        return user
+
     async def create_webauthn_credential(self, user, **kwargs):
         if self.webauthn_model is None:
             raise RuntimeError("webauthn_model is required for WebAuthn credentials")
@@ -168,4 +190,8 @@ class SQLAlchemyUserDatastore:
         return True
 
     async def commit(self):
-        await self.session.commit()
+        active = self.session
+        try:
+            await active.commit()
+        finally:
+            self._active_session.set(None)
