@@ -1,9 +1,8 @@
-import asyncio
-
 """Auth blueprint and route handlers."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import hmac
