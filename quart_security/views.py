@@ -1,3 +1,5 @@
+import asyncio
+
 """Auth blueprint and route handlers."""
 
 from __future__ import annotations
@@ -655,7 +657,7 @@ async def two_factor_setup():
         authr_key = pending_secret
         issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
         uri = get_totp_uri(pending_secret, current_user.email, issuer)
-        authr_qrcode = generate_qr_code(uri)
+        authr_qrcode = await asyncio.to_thread(generate_qr_code, uri)
 
     return await render_template(
         "security/two_factor_setup.html",
