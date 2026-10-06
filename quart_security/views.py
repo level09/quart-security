@@ -165,6 +165,10 @@ def _webauthn_rp_name() -> str:
 
 async def _set_wan_state(key: str, **payload):
     await _pop_wan_state(key)
+    if key == "tf_setup_state":
+        from .totp import encrypt_totp_secret
+
+        payload["secret"] = encrypt_totp_secret(payload["secret"])
     session[key] = await _security.state_store.put(payload, ttl=300)
 
 
@@ -174,10 +178,11 @@ async def _pop_wan_state(key: str) -> dict | None:
 
 
 async def _verify_totp_once(secret, token):
-    from .totp import matching_totp_step
+    from .totp import decrypt_totp_secret, matching_totp_step
 
     if not secret or not token:
         return False
+    secret = decrypt_totp_secret(secret)
     step = matching_totp_step(secret, token)
     if step is None:
         return False
@@ -592,7 +597,9 @@ async def two_factor_setup():
                 and token
                 and await _verify_totp_once(pending_secret, token)
             ):
-                current_user.tf_totp_secret = pending_secret
+                from .totp import encrypt_totp_secret
+
+                current_user.tf_totp_secret = encrypt_totp_secret(pending_secret)
                 current_user.tf_primary_method = "authenticator"
 
                 raw_codes = []
@@ -642,7 +649,9 @@ async def two_factor_setup():
                 "tf_setup_state", secret=pending_secret, user_id=current_user.get_id()
             )
         else:
-            pending_secret = pending["secret"]
+            from .totp import decrypt_totp_secret
+
+            pending_secret = decrypt_totp_secret(pending["secret"])
         authr_key = pending_secret
         issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
         uri = get_totp_uri(pending_secret, current_user.email, issuer)

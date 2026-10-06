@@ -170,12 +170,15 @@ async def test_setup_secret_is_server_side_and_old_cookie_cannot_disable_mfa(
     pending = await app_two_factor.extensions["security"].state_store.get(
         copied["tf_setup_state"]
     )
-    assert pending["secret"] in body
+    from quart_security.totp import decrypt_totp_secret
+
+    secret = decrypt_totp_secret(pending["secret"], app=app_two_factor)
+    assert secret in body
     assert 'name="action" value="verify"' in body
     assert pending["secret"] not in str(copied)
     result = await client_two_factor.post(
         "/tf-setup",
-        form={"action": "verify", "token": pyotp.TOTP(pending["secret"]).now()},
+        form={"action": "verify", "token": pyotp.TOTP(secret).now()},
     )
     assert result.status_code == 200
     stolen = app_two_factor.test_client()

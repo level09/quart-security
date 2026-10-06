@@ -14,6 +14,7 @@ from .password import init_password_context
 from .proxies import AnonymousUser, current_user
 from .signals import user_authenticated, user_logged_out
 from .state import SQLAlchemyStateStore
+from .totp import encrypt_totp_secret, init_totp_encryption
 from .utils import maybe_await, naive_utcnow, url_for_security
 
 
@@ -119,6 +120,7 @@ class Security:
             app.config.get("SESSION_COOKIE_SAMESITE") or "Lax"
         )
         init_password_context(app)
+        init_totp_encryption(app)
 
         from .views import security_bp
 
@@ -228,6 +230,11 @@ class Security:
             session.clear()
             g._current_user = AnonymousUser()
             return
+        if getattr(user, "tf_totp_secret", None) and not user.tf_totp_secret.startswith(
+            "fernet$"
+        ):
+            user.tf_totp_secret = encrypt_totp_secret(user.tf_totp_secret)
+            await maybe_await(self.datastore.commit())
         g._current_user = user
 
     async def login_user(self, user, fresh=True):
@@ -248,6 +255,10 @@ class Security:
             user.current_login_ip = request.remote_addr
             user.login_count = (getattr(user, "login_count", None) or 0) + 1
 
+        if getattr(user, "tf_totp_secret", None) and not user.tf_totp_secret.startswith(
+            "fernet$"
+        ):
+            user.tf_totp_secret = encrypt_totp_secret(user.tf_totp_secret)
         await maybe_await(self.datastore.commit())
         token = await self.state_store.put(
             {"user_id": user_id},

@@ -18,6 +18,7 @@ from quart_security import (
     hash_password,
     roles_required,
 )
+from quart_security.totp import decrypt_totp_secret
 
 
 class AuthUser(Base, UserMixin):
@@ -147,12 +148,15 @@ async def test_sql_mfa_setup_and_recovery(sql_app, database):
         pending = await check.scalar(
             select(SecurityState.payload).where(SecurityState.token == pending_token)
         )
+    assert pending["secret"].startswith("fernet$")
     result = await client.post(
         "/tf-setup",
         form={
             "csrf_token": token,
             "action": "verify",
-            "token": pyotp.TOTP(pending["secret"]).now(),
+            "token": pyotp.TOTP(
+                decrypt_totp_secret(pending["secret"], app=sql_app)
+            ).now(),
         },
     )
     assert result.status_code == 200
@@ -205,7 +209,9 @@ async def test_concurrent_enrollment_has_one_winner(sql_app, database, monkeypat
             {
                 "csrf_token": token,
                 "action": "verify",
-                "token": pyotp.TOTP(payload["secret"]).now(),
+                "token": pyotp.TOTP(
+                    decrypt_totp_secret(payload["secret"], app=sql_app)
+                ).now(),
             }
         )
     barrier = asyncio.Barrier(2)

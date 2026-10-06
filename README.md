@@ -327,3 +327,10 @@ or SQLAlchemy model fields.
 Dependencies now include the Pillow, bcrypt, and SQLAlchemy asyncio extras and patched
 minimum versions of aiosmtplib, cryptography, and cbor2. The release workflow runs
 lint and tests before building and publishing. CI tests Python 3.11 through 3.14.
+
+
+## TOTP encryption and key rotation
+
+Version 2.0.1 encrypts enrolled TOTP seeds and pending setup secrets with authenticated Fernet encryption. Legacy plaintext seeds remain readable and are encrypted on successful login or an authenticated request. Hosts should encrypt dormant records during upgrade using `encrypt_totp_secret(value, app=app)`. This requires no schema change for a 255-character seed column.
+
+By default, the key is derived from `SECRET_KEY` with a separate purpose label. Keep that key stable. For independent rotation, configure `SECURITY_TOTP_ENCRYPTION_KEYS` as a nonempty list of Fernet keys. The first key encrypts new data; all keys can decrypt existing data. Retain old keys while rotating existing seeds with `encrypt_totp_secret`, including active pending setup states until their five-minute expiry. Remove old keys only after all data and required backups have been handled. Never rotate `SECRET_KEY` without preserving the derived MFA key if using the default. `derive_totp_encryption_key(old_secret_key)` supplies that key for an explicit keyring. Protect the keyring separately from database backups.

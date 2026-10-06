@@ -9,6 +9,53 @@ import io
 import secrets
 import time
 
+_TOTP_CIPHER_PREFIX = "fernet$"
+
+
+def derive_totp_encryption_key(secret_key):
+    if isinstance(secret_key, str):
+        secret_key = secret_key.encode()
+    if not secret_key:
+        raise RuntimeError("TOTP encryption requires SECRET_KEY")
+    return base64.urlsafe_b64encode(
+        hmac.digest(secret_key, b"quart-security/totp-encryption/v1", "sha256")
+    )
+
+
+def init_totp_encryption(app):
+    from cryptography.fernet import Fernet, MultiFernet
+
+    keys = app.config.get("SECURITY_TOTP_ENCRYPTION_KEYS")
+    if keys is None:
+        keys = [derive_totp_encryption_key(app.secret_key)]
+    if not isinstance(keys, (list, tuple)) or not keys:
+        raise ValueError("SECURITY_TOTP_ENCRYPTION_KEYS must be a nonempty key list")
+    app.extensions["quart_security_totp"] = MultiFernet([Fernet(key) for key in keys])
+
+
+def _totp_cipher(app=None):
+    from quart import current_app
+
+    return (app or current_app).extensions["quart_security_totp"]
+
+
+def encrypt_totp_secret(secret, *, app=None):
+    cipher = _totp_cipher(app)
+    if secret.startswith(_TOTP_CIPHER_PREFIX):
+        token = cipher.rotate(secret[len(_TOTP_CIPHER_PREFIX) :].encode())
+    else:
+        token = cipher.encrypt(secret.encode())
+    return _TOTP_CIPHER_PREFIX + token.decode()
+
+
+def decrypt_totp_secret(secret, *, app=None):
+    # Legacy seeds remain readable until the host encrypts existing records.
+    if not secret.startswith(_TOTP_CIPHER_PREFIX):
+        return secret
+    return (
+        _totp_cipher(app).decrypt(secret[len(_TOTP_CIPHER_PREFIX) :].encode()).decode()
+    )
+
 
 def _require_pyotp():
     try:
@@ -24,6 +71,7 @@ def generate_totp_secret() -> str:
 
 
 def get_totp_uri(secret: str, email: str, issuer: str) -> str:
+    secret = decrypt_totp_secret(secret)
     pyotp = _require_pyotp()
     return pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name=issuer)
 
@@ -46,6 +94,7 @@ def verify_totp(secret: str, token: str) -> bool:
 
 
 def matching_totp_step(secret: str, token: str) -> int | None:
+    secret = decrypt_totp_secret(secret)
     pyotp = _require_pyotp()
     totp = pyotp.TOTP(secret)
     step = int(time.time()) // totp.interval

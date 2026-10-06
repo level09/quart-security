@@ -35,7 +35,9 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
     assert post_response.status_code == 200
     assert "Recovery codes" in await post_response.get_data(as_text=True)
     assert user.tf_primary_method == "authenticator"
-    assert user.tf_totp_secret == secret
+    assert user.tf_totp_secret.startswith("fernet$")
+    assert user.tf_totp_secret != secret
+    assert totp.decrypt_totp_secret(user.tf_totp_secret, app=app_two_factor) == secret
     assert (
         len(user.mf_recovery_codes or [])
         == app_two_factor.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES_N"]
@@ -69,6 +71,7 @@ async def test_login_requires_second_factor_then_allows_access(
     valid_code = await client_two_factor.post(
         "/tf-validate", form={"token": pyotp.TOTP(user.tf_totp_secret).now()}
     )
+    assert user.tf_totp_secret.startswith("fernet$")
     assert valid_code.status_code == 302
     assert valid_code.headers["Location"].endswith("/protected")
 
