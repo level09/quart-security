@@ -24,7 +24,7 @@ async def test_register_creates_user(client, app):
     user = datastore.find_user(email="new@example.com")
     assert user is not None
     assert user.password != "new-password-123"
-    assert verify_password("new-password-123", user.password)
+    assert verify_password("new-password-123", user.password, app=app)
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_change_password_requires_current_for_standard_user(client, app):
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/change")
     assert user.password != old_hash
-    assert verify_password("updated-password-123", user.password)
+    assert verify_password("updated-password-123", user.password, app=app)
 
     await client.post("/logout")
 
@@ -127,7 +127,7 @@ async def test_change_password_skips_current_for_oauth_style_user(client, app):
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/change")
     assert user.password_set is True
-    assert verify_password("oauth-updated-123", user.password)
+    assert verify_password("oauth-updated-123", user.password, app=app)
 
 
 @pytest.mark.asyncio
@@ -170,9 +170,11 @@ async def test_logout_rejects_get(client):
 
 @pytest.mark.asyncio
 async def test_logout_requires_valid_csrf(client, app):
+    await client.post(
+        "/login", form={"email": "user@example.com", "password": "correct-password"}
+    )
     app.config["SECURITY_CSRF_PROTECT"] = True
     async with client.session_transaction() as sess:
-        sess["_user_id"] = "user-1"
         sess["_csrf_token"] = "valid-token"
 
     rejected = await client.post("/logout")

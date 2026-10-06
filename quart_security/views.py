@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import hmac
 import json
 import secrets
+import time
 from urllib.parse import urlsplit
 
 from quart import (
@@ -81,14 +84,16 @@ def _account_is_locked(user) -> bool:
 
 
 async def _record_auth_failure(user):
-    if not hasattr(user, "failed_login_count"):
+    max_attempts = current_app.config["SECURITY_LOGIN_MAX_ATTEMPTS"]
+    if not max_attempts:
         return
-    user.failed_login_count = (user.failed_login_count or 0) + 1
-    max_attempts = current_app.config.get("SECURITY_LOGIN_MAX_ATTEMPTS", 5)
-    if user.failed_login_count >= max_attempts:
-        minutes = current_app.config.get("SECURITY_LOCKOUT_MINUTES", 15)
-        user.locked_until = naive_utcnow() + datetime.timedelta(minutes=minutes)
-    await _commit()
+    await maybe_await(
+        _security.datastore.record_auth_failure(
+            user,
+            max_attempts=max_attempts,
+            lockout_minutes=current_app.config["SECURITY_LOCKOUT_MINUTES"],
+        )
+    )
 
 
 async def _reset_auth_failures(user):
@@ -158,25 +163,48 @@ def _webauthn_rp_name() -> str:
     return str(current_app.config.get("SECURITY_WAN_RP_NAME") or current_app.name)
 
 
-def _set_wan_state(key: str, **payload):
-    session[key] = {
-        "payload": payload,
-        "issued_at": int(naive_utcnow().timestamp()),
-    }
+async def _set_wan_state(key: str, **payload):
+    await _pop_wan_state(key)
+    session[key] = await _security.state_store.put(payload, ttl=300)
 
 
-def _pop_wan_state(key: str, max_age_seconds: int = 300) -> dict | None:
-    state = session.pop(key, None)
-    if not isinstance(state, dict):
-        return None
-    issued_at = state.get("issued_at")
-    payload = state.get("payload")
-    if not isinstance(issued_at, int) or not isinstance(payload, dict):
-        return None
-    age = int(naive_utcnow().timestamp()) - issued_at
-    if age < 0 or age > max_age_seconds:
-        return None
-    return payload
+async def _pop_wan_state(key: str) -> dict | None:
+    token = session.pop(key, None)
+    return await _security.state_store.pop(token) if isinstance(token, str) else None
+
+
+async def _verify_totp_once(secret, token):
+    from .totp import matching_totp_step
+
+    if not secret or not token:
+        return False
+    step = matching_totp_step(secret, token)
+    if step is None:
+        return False
+    key = current_app.secret_key
+    if isinstance(key, str):
+        key = key.encode()
+    digest = hmac.new(key, secret.encode(), hashlib.sha256).hexdigest()
+    return await _security.state_store.claim(f"totp:{digest}:{step}", ttl=120)
+
+
+async def _consume_recovery_code(user, token):
+    from .totp import ensure_hashed_recovery_codes, verify_recovery_code
+
+    codes = list(user.mf_recovery_codes or [])
+    ok, remaining = verify_recovery_code(
+        token, codes, secret_key=current_app.secret_key
+    )
+    return bool(
+        ok
+        and await maybe_await(
+            _security.datastore.replace_recovery_codes(
+                user,
+                codes,
+                ensure_hashed_recovery_codes(remaining, current_app.secret_key),
+            )
+        )
+    )
 
 
 async def _list_webauthn_credentials(user, usage: str | None = None):
@@ -343,10 +371,9 @@ async def login():
             if current_app.config.get("SECURITY_TWO_FACTOR") and getattr(
                 user, "tf_primary_method", None
             ):
-                session["tf_user_id"] = {
-                    "user_id": user.get_id(),
-                    "issued_at": int(naive_utcnow().timestamp()),
-                }
+                session["tf_user_id"] = await _security.state_store.put(
+                    {"user_id": user.get_id()}, ttl=300
+                )
                 return redirect(url_for_security("two_factor_token_validation"))
 
             await _reset_auth_failures(user)
@@ -447,7 +474,7 @@ async def change_password():
 
         has_usable_password = getattr(user, "has_usable_password", True)
         if has_usable_password and getattr(user, "password", None):
-            current_password = (form.password.data or "").strip()
+            current_password = form.password.data or ""
             if not current_password:
                 await flash("Current password is required", "error")
                 return await render_template(
@@ -494,7 +521,7 @@ async def change_password():
         if hasattr(user, "password_set"):
             user.password_set = True
 
-        await _commit()
+        await _security.revoke_user_sessions(user)
         await password_changed.send_async(current_app._get_current_object(), user=user)
 
         await flash("Password updated", "success")
@@ -522,7 +549,6 @@ async def two_factor_setup():
         generate_totp_secret,
         get_totp_uri,
         hash_recovery_codes,
-        verify_totp,
     )
 
     primary_method = getattr(current_user, "tf_primary_method", None) or "none"
@@ -533,10 +559,22 @@ async def two_factor_setup():
         action = form_data.get("action")
 
         if action == "disable":
+            token = (form_data.get("token") or "").strip()
+            valid = await _verify_totp_once(current_user.tf_totp_secret, token)
+            if (
+                not valid
+                and token
+                and current_app.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES"]
+            ):
+                valid = await _consume_recovery_code(current_user, token)
+            if current_user.tf_primary_method and not valid:
+                await flash("Current authentication code is required.", "error")
+                return redirect(url_for_security("two_factor_setup"))
             current_user.tf_totp_secret = None
             current_user.tf_primary_method = None
-            session.pop("tf_pending_secret", None)
-            await _commit()
+            current_user.mf_recovery_codes = []
+            await _pop_wan_state("tf_setup_state")
+            await _security.revoke_user_sessions(current_user)
             await tf_profile_changed.send_async(
                 current_app._get_current_object(), user=current_user
             )
@@ -545,11 +583,17 @@ async def two_factor_setup():
 
         if action == "verify":
             token = (form_data.get("token") or "").strip()
-            pending_secret = session.get("tf_pending_secret")
-            if pending_secret and token and verify_totp(pending_secret, token):
+            pending = await _pop_wan_state("tf_setup_state")
+            pending_secret = pending.get("secret") if pending else None
+            if (
+                pending_secret
+                and pending["user_id"] == current_user.get_id()
+                and not current_user.tf_primary_method
+                and token
+                and await _verify_totp_once(pending_secret, token)
+            ):
                 current_user.tf_totp_secret = pending_secret
                 current_user.tf_primary_method = "authenticator"
-                session.pop("tf_pending_secret", None)
 
                 raw_codes = []
                 if current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
@@ -562,7 +606,7 @@ async def two_factor_setup():
                             raw_codes, current_app.secret_key
                         )
 
-                await _commit()
+                await _security.revoke_user_sessions(current_user)
                 await tf_profile_changed.send_async(
                     current_app._get_current_object(), user=current_user
                 )
@@ -588,10 +632,17 @@ async def two_factor_setup():
     # Only show QR when user explicitly chose to set up authenticator
     if primary_method == "none" and request.args.get("setup") == "authenticator":
         chosen_method = "authenticator"
-        pending_secret = session.get("tf_pending_secret")
-        if not pending_secret:
+        token = session.get("tf_setup_state")
+        pending = (
+            await _security.state_store.get(token) if isinstance(token, str) else None
+        )
+        if not pending or pending["user_id"] != current_user.get_id():
             pending_secret = generate_totp_secret()
-            session["tf_pending_secret"] = pending_secret
+            await _set_wan_state(
+                "tf_setup_state", secret=pending_secret, user_id=current_user.get_id()
+            )
+        else:
+            pending_secret = pending["secret"]
         authr_key = pending_secret
         issuer = current_app.config.get("SECURITY_TOTP_ISSUER", "Quart")
         uri = get_totp_uri(pending_secret, current_user.email, issuer)
@@ -612,28 +663,23 @@ async def two_factor_token_validation():
     if not current_app.config.get("SECURITY_TWO_FACTOR", False):
         abort(404)
 
-    from .totp import (
-        ensure_hashed_recovery_codes,
-        verify_recovery_code,
-        verify_totp,
-    )
-
     form = await TwoFactorVerifyForm.from_formdata()
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
-    tf_state = session.get("tf_user_id")
-    if isinstance(tf_state, dict):
-        if int(naive_utcnow().timestamp()) - tf_state.get("issued_at", 0) > 300:
-            session.pop("tf_user_id", None)
-            return redirect(url_for_security("login"))
-        user_id = tf_state.get("user_id")
-    else:
+    state_token = session.get("tf_user_id")
+    tf_state = (
+        await _security.state_store.get(state_token)
+        if isinstance(state_token, str)
+        else None
+    )
+    if not tf_state:
         session.pop("tf_user_id", None)
         return redirect(url_for_security("login"))
+    user_id = tf_state.get("user_id")
     if not user_id:
         return redirect(url_for_security("login"))
 
     user = await _find_user(fs_uniquifier=user_id)
-    if user is None:
+    if user is None or not getattr(user, "active", True):
         session.pop("tf_user_id", None)
         return redirect(url_for_security("login"))
     if _account_is_locked(user):
@@ -646,25 +692,18 @@ async def two_factor_token_validation():
         valid = False
 
         if token and getattr(user, "tf_totp_secret", None):
-            valid = verify_totp(user.tf_totp_secret, token)
+            valid = await _verify_totp_once(user.tf_totp_secret, token)
 
         if (
             not valid
             and token
             and current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True)
         ):
-            codes = list(getattr(user, "mf_recovery_codes", None) or [])
-            ok, remaining = verify_recovery_code(
-                token, codes, secret_key=current_app.secret_key
-            )
-            if ok:
-                user.mf_recovery_codes = ensure_hashed_recovery_codes(
-                    remaining, current_app.secret_key
-                )
-                await _commit()
-                valid = True
+            valid = await _consume_recovery_code(user, token)
 
         if valid:
+            if await _pop_wan_state("tf_user_id") is None:
+                return redirect(url_for_security("login"))
             session.pop("tf_user_id", None)
             await _reset_auth_failures(user)
             await _security.login_user(user)
@@ -705,7 +744,7 @@ async def mf_recovery_codes():
         current_user.mf_recovery_codes = hash_recovery_codes(
             codes, current_app.secret_key
         )
-        await _commit()
+        await _security.revoke_user_sessions(current_user)
         await tf_profile_changed.send_async(
             current_app._get_current_object(), user=current_user
         )
@@ -723,16 +762,21 @@ async def mf_recovery_codes():
 
 @security_bp.route("/mf-recovery", methods=["GET", "POST"])
 async def mf_recovery():
+    if not current_app.config.get(
+        "SECURITY_TWO_FACTOR", False
+    ) or not current_app.config.get("SECURITY_MULTI_FACTOR_RECOVERY_CODES", True):
+        abort(404)
     form = await RecoveryCodeForm.from_formdata()
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
 
     if _is_post() and form.validate():
-        tf_state = session.get("tf_user_id")
-        if not isinstance(tf_state, dict):
-            session.pop("tf_user_id", None)
-            return redirect(url_for_security("login"))
-        issued_at = tf_state.get("issued_at", 0)
-        if int(naive_utcnow().timestamp()) - issued_at > 300:
+        state_token = session.get("tf_user_id")
+        tf_state = (
+            await _security.state_store.get(state_token)
+            if isinstance(state_token, str)
+            else None
+        )
+        if not tf_state:
             session.pop("tf_user_id", None)
             return redirect(url_for_security("login"))
         user_id = tf_state.get("user_id")
@@ -740,23 +784,14 @@ async def mf_recovery():
             return redirect(url_for_security("login"))
 
         user = await _find_user(fs_uniquifier=user_id)
-        if user is None:
+        if user is None or not getattr(user, "active", True):
             return redirect(url_for_security("login"))
         if _account_is_locked(user):
             return redirect(url_for_security("login"))
 
-        from .totp import ensure_hashed_recovery_codes, verify_recovery_code
-
-        ok, remaining = verify_recovery_code(
-            form.code.data.strip(),
-            list(getattr(user, "mf_recovery_codes", None) or []),
-            secret_key=current_app.secret_key,
-        )
-        if ok:
-            user.mf_recovery_codes = ensure_hashed_recovery_codes(
-                remaining, current_app.secret_key
-            )
-            await _commit()
+        if await _consume_recovery_code(user, form.code.data.strip()):
+            if await _pop_wan_state("tf_user_id") is None:
+                return redirect(url_for_security("login"))
             session.pop("tf_user_id", None)
             await _reset_auth_failures(user)
             await _security.login_user(user)
@@ -829,11 +864,12 @@ async def wan_register():
         )
         credential_options = wan.options_to_json_dict(options)
 
-        _set_wan_state(
+        await _set_wan_state(
             "wan_register_state",
             challenge=wan.bytes_to_base64url(challenge),
             name=form.name.data.strip(),
             usage=requested_usage,
+            user_id=current_user.get_id(),
         )
         await _commit()
 
@@ -848,16 +884,18 @@ async def wan_register():
 
 
 @security_bp.route("/wan-register-response", methods=["POST"])
-@auth_required("session")
+@auth_required("session", fresh=True)
 async def wan_register_response():
     if not current_app.config.get("SECURITY_WEBAUTHN", False):
         abort(404)
 
     await _enforce_csrf()
-    state = _pop_wan_state("wan_register_state")
+    state = await _pop_wan_state("wan_register_state")
     if not state:
         await flash("Passkey registration expired. Please try again.", "error")
         return redirect(url_for_security("wan_register"))
+    if state.get("user_id") != current_user.get_id():
+        abort(400)
 
     credential_payload = await _extract_webauthn_credential_payload()
     if not credential_payload:
@@ -899,7 +937,7 @@ async def wan_register_response():
         device_type=verification.get("device_type") or "single_device",
         lastuse_datetime=naive_utcnow(),
     )
-    await _commit()
+    await _security.revoke_user_sessions(current_user)
 
     await flash("Passkey registered successfully.", "success")
     return redirect(url_for_security("wan_register"))
@@ -925,9 +963,12 @@ async def wan_signin():
             [],
             rp_id=_webauthn_rp_id(),
             challenge=challenge,
+            require_user_verification=current_app.config[
+                "SECURITY_WAN_REQUIRE_USER_VERIFICATION"
+            ],
         )
         credential_options = wan.options_to_json_dict(options)
-        _set_wan_state(
+        await _set_wan_state(
             "wan_signin_state",
             challenge=wan.bytes_to_base64url(challenge),
         )
@@ -948,7 +989,7 @@ async def wan_signin_response():
         abort(404)
 
     await _enforce_csrf()
-    state = _pop_wan_state("wan_signin_state")
+    state = await _pop_wan_state("wan_signin_state")
     if not state:
         await flash("Passkey sign-in expired. Please try again.", "error")
         return redirect(url_for_security("wan_signin"))
@@ -960,7 +1001,7 @@ async def wan_signin_response():
         return redirect(url_for_security("wan_signin"))
 
     stored_credential = await _find_webauthn_credential(credential_id, user=None)
-    if stored_credential is None:
+    if stored_credential is None or stored_credential.usage != "primary":
         await flash("Passkey not recognized.", "error")
         return redirect(url_for_security("wan_signin"))
 
@@ -1041,9 +1082,12 @@ async def wan_verify():
             credentials,
             rp_id=_webauthn_rp_id(),
             challenge=challenge,
+            require_user_verification=current_app.config[
+                "SECURITY_WAN_REQUIRE_USER_VERIFICATION"
+            ],
         )
         credential_options = wan.options_to_json_dict(options)
-        _set_wan_state(
+        await _set_wan_state(
             "wan_verify_state",
             challenge=wan.bytes_to_base64url(challenge),
             user_id=current_user.get_id(),
@@ -1067,7 +1111,7 @@ async def wan_verify_response():
         abort(404)
 
     await _enforce_csrf()
-    state = _pop_wan_state("wan_verify_state")
+    state = await _pop_wan_state("wan_verify_state")
     if not state:
         await flash("Passkey verification expired. Please try again.", "error")
         return redirect(url_for_security("wan_verify"))
@@ -1112,6 +1156,7 @@ async def wan_verify_response():
         stored_credential.lastuse_datetime = naive_utcnow()
 
     session["_fresh"] = True
+    session["_auth_at"] = int(time.time())
     await _commit()
 
     await flash("Passkey verification successful.", "success")
@@ -1165,7 +1210,7 @@ async def wan_delete():
         return redirect(url_for_security("wan_register"))
 
     await _delete_webauthn_credential(current_user, target)
-    await _commit()
+    await _security.revoke_user_sessions(current_user)
     await flash("Passkey removed.", "success")
     if isinstance(payload, dict):
         return {"status": "ok"}

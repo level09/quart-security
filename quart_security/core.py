@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import secrets
 import time
 from datetime import timedelta
+from uuid import uuid4
 
-from quart import current_app, g, request, session
+from quart import abort, current_app, g, request, session
 
+from .datastore import SQLAlchemyUserDatastore
 from .forms import ChangePasswordForm, LoginForm, RegisterForm
 from .password import init_password_context
 from .proxies import AnonymousUser, current_user
 from .signals import user_authenticated, user_logged_out
+from .state import SQLAlchemyStateStore
 from .utils import maybe_await, naive_utcnow, url_for_security
 
 
@@ -54,6 +56,7 @@ class Security:
             "change_password_form", ChangePasswordForm
         )
         self.mail_util_cls = kwargs.get("mail_util_cls")
+        self.state_store = kwargs.get("state_store")
 
         if app is not None:
             self.init_app(app, datastore=datastore, **kwargs)
@@ -71,8 +74,50 @@ class Security:
             "change_password_form", self.change_password_form_cls
         )
         self.mail_util_cls = kwargs.get("mail_util_cls", self.mail_util_cls)
+        self.state_store = kwargs.get("state_store", self.state_store)
+        if self.state_store is None:
+            if not isinstance(self.datastore, SQLAlchemyUserDatastore):
+                raise RuntimeError("Custom datastores require a shared state_store")
+            self.state_store = SQLAlchemyStateStore(self.datastore)
 
         self._load_defaults(app)
+        for name in ("put", "get", "pop", "claim"):
+            if not callable(getattr(self.state_store, name, None)):
+                raise RuntimeError(f"Security state_store requires {name}")
+        required_hooks = ["rotate_uniquifier"]
+        if app.config["SECURITY_LOGIN_MAX_ATTEMPTS"] > 0:
+            required_hooks.append("record_auth_failure")
+        if app.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES"]:
+            required_hooks.append("replace_recovery_codes")
+        for name in required_hooks:
+            if not callable(getattr(self.datastore, name, None)):
+                raise RuntimeError(f"Security requires atomic datastore hook: {name}")
+        if isinstance(self.datastore, SQLAlchemyUserDatastore):
+            required_fields = ["fs_uniquifier", "email", "password", "active"]
+            if app.config["SECURITY_LOGIN_MAX_ATTEMPTS"] > 0:
+                required_fields += ["failed_login_count", "locked_until"]
+            if app.config["SECURITY_TWO_FACTOR"]:
+                required_fields += ["tf_primary_method", "tf_totp_secret"]
+            if app.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES"]:
+                required_fields.append("mf_recovery_codes")
+            if app.config["SECURITY_WEBAUTHN"]:
+                required_fields.append("fs_webauthn_user_handle")
+            missing = [
+                name
+                for name in required_fields
+                if not hasattr(self.datastore.user_model, name)
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"Security user model lacks fields: {', '.join(missing)}"
+                )
+        if not app.secret_key:
+            raise RuntimeError("Security requires SECRET_KEY")
+        app.config["SESSION_COOKIE_SECURE"] = app.config["SECURITY_COOKIE_SECURE"]
+        app.config["SESSION_COOKIE_HTTPONLY"] = True
+        app.config["SESSION_COOKIE_SAMESITE"] = (
+            app.config.get("SESSION_COOKIE_SAMESITE") or "Lax"
+        )
         init_password_context(app)
 
         from .views import security_bp
@@ -86,13 +131,35 @@ class Security:
 
             @app.before_request
             async def _security_load_user():
+                begin = getattr(self.datastore, "begin_request", None)
+                if begin:
+                    begin()
                 await self.load_user()
 
             @app.before_websocket
             async def _security_load_user_ws():
+                begin = getattr(self.datastore, "begin_request", None)
+                if begin:
+                    begin()
                 await self.load_user()
 
+            @app.teardown_request
+            @app.teardown_websocket
+            async def _security_close_session(_exception):
+                close = getattr(self.datastore, "close", None)
+                if close:
+                    await maybe_await(close())
+
             app.extensions["quart_security_load_user_registered"] = True
+
+            if isinstance(self.state_store, SQLAlchemyStateStore):
+
+                @app.before_serving
+                async def _security_validate_state():
+                    try:
+                        await self.state_store.validate()
+                    finally:
+                        await self.datastore.close()
 
         app.jinja_env.globals.setdefault("url_for_security", url_for_security)
 
@@ -138,6 +205,7 @@ class Security:
             "SECURITY_POST_REGISTER_VIEW": "/login",
             "SECURITY_EMAIL_SENDER": "noreply@example.com",
             "SECURITY_CSRF_PROTECT": True,
+            "SECURITY_COOKIE_SECURE": True,
         }
 
         for key, value in defaults.items():
@@ -146,6 +214,12 @@ class Security:
     async def load_user(self):
         user_id = session.get("_user_id")
         if not user_id:
+            g._current_user = AnonymousUser()
+            return
+
+        state = await self.state_store.get(session.get("_id"))
+        if not state or state.get("user_id") != user_id:
+            session.clear()
             g._current_user = AnonymousUser()
             return
 
@@ -158,22 +232,14 @@ class Security:
 
     async def login_user(self, user, fresh=True):
         app = current_app._get_current_object()
+        if not user.is_active:
+            raise ValueError("Cannot authenticate an inactive user")
 
         user_id = user.get_id() if hasattr(user, "get_id") else None
         if not user_id:
             user_id = getattr(user, "fs_uniquifier", None)
         if not user_id:
             raise RuntimeError("User must have fs_uniquifier/get_id for session login")
-
-        # Regenerate session to prevent fixation: discard pre-login state,
-        # then write only the login keys into a clean session.
-        session.clear()
-        session["_user_id"] = user_id
-        session["_fresh"] = bool(fresh)
-        session["_auth_at"] = int(time.time())
-        session["_id"] = secrets.token_hex(16)
-        session.modified = True
-        g._current_user = user
 
         if app.config.get("SECURITY_TRACKABLE", True):
             user.last_login_at = getattr(user, "current_login_at", None)
@@ -183,13 +249,40 @@ class Security:
             user.login_count = (getattr(user, "login_count", None) or 0) + 1
 
         await maybe_await(self.datastore.commit())
+        token = await self.state_store.put(
+            {"user_id": user_id},
+            ttl=int(app.permanent_session_lifetime.total_seconds()),
+        )
+        # Discard pre-login state only after authentication writes succeed.
+        session.clear()
+        session["_user_id"] = user_id
+        session["_fresh"] = bool(fresh)
+        session["_auth_at"] = int(time.time())
+        session["_id"] = token
+        g._current_user = user
         await user_authenticated.send_async(app, user=user, authn_via="session")
+
+    async def revoke_user_sessions(self, user):
+        changed = await maybe_await(
+            self.datastore.rotate_uniquifier(user, user.get_id(), uuid4().hex)
+        )
+        if not changed:
+            session.clear()
+            g._current_user = AnonymousUser()
+            abort(409)
+        await self.state_store.pop(session.get("_id"))
+        session["_user_id"] = user.get_id()
+        session["_id"] = await self.state_store.put(
+            {"user_id": user.get_id()},
+            ttl=int(current_app.permanent_session_lifetime.total_seconds()),
+        )
 
     async def logout_user(self, user=None):
         app = current_app._get_current_object()
         target_user = user or getattr(g, "_current_user", AnonymousUser())
 
         if getattr(target_user, "is_authenticated", False):
+            await self.state_store.pop(session.get("_id"))
             await user_logged_out.send_async(app, user=target_user)
 
         session.clear()

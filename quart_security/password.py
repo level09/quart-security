@@ -3,9 +3,7 @@
 import asyncio
 
 from passlib.context import CryptContext
-
-_pwd_context: CryptContext | None = None
-_password_salt: str | None = None
+from quart import current_app
 
 # OWASP 2025 minimum argon2id parameters
 _ARGON2_MEMORY_COST = 19456  # KiB
@@ -24,10 +22,7 @@ def init_password_context(app):
     Set SECURITY_ARGON2_MEMORY_COST / _TIME_COST / _PARALLELISM to override
     argon2 parameters (useful for test environments).
     """
-    global _pwd_context, _password_salt
-
     scheme = app.config.get("SECURITY_PASSWORD_HASH", "argon2")
-    _password_salt = app.config.get("SECURITY_PASSWORD_SALT")
 
     memory_cost = app.config.get("SECURITY_ARGON2_MEMORY_COST", _ARGON2_MEMORY_COST)
     time_cost = app.config.get("SECURITY_ARGON2_TIME_COST", _ARGON2_TIME_COST)
@@ -35,7 +30,7 @@ def init_password_context(app):
 
     # Build context: argon2 with OWASP params, legacy schemes deprecated.
     # CryptContext handles per-scheme kwargs via <scheme>__<param> notation.
-    _pwd_context = CryptContext(
+    context = CryptContext(
         schemes=["argon2", "pbkdf2_sha512", "bcrypt"],
         default=scheme,
         deprecated="auto",
@@ -44,43 +39,47 @@ def init_password_context(app):
         argon2__parallelism=parallelism,
         argon2__type="id",
     )
+    app.extensions["quart_security_password"] = (
+        context,
+        app.config.get("SECURITY_PASSWORD_SALT"),
+    )
 
 
-def _ensure_context() -> CryptContext:
-    if _pwd_context is None:
-        raise RuntimeError("Password context is not initialized")
-    return _pwd_context
+def _password_config(app=None):
+    return (app or current_app).extensions["quart_security_password"]
 
 
-def hash_password(password: str) -> str:
-    return _ensure_context().hash(password)
+def hash_password(password: str, *, app=None) -> str:
+    context, _salt = _password_config(app)
+    return context.hash(password)
 
 
-def verify_password(password: str, password_hash: str) -> bool:
-    context = _ensure_context()
+def verify_password(password: str, password_hash: str, *, app=None) -> bool:
+    context, salt = _password_config(app)
     if context.verify(password, password_hash):
         return True
     # Optional fallback for deployments that previously mixed in app salt.
-    if _password_salt:
-        return context.verify(f"{password}{_password_salt}", password_hash)
+    if salt:
+        return context.verify(f"{password}{salt}", password_hash)
     return False
 
 
-def password_needs_rehash(password_hash: str) -> bool:
+def password_needs_rehash(password_hash: str, *, app=None) -> bool:
     """Return True if the hash was made with a deprecated/weaker scheme.
 
     Call this after a successful verify to decide whether to upgrade the
     stored hash transparently on login.
     """
-    return _ensure_context().needs_update(password_hash)
+    context, _salt = _password_config(app)
+    return context.needs_update(password_hash)
 
 
-async def hash_password_async(password: str) -> str:
-    return await asyncio.to_thread(hash_password, password)
+async def hash_password_async(password: str, *, app=None) -> str:
+    return await asyncio.to_thread(hash_password, password, app=app)
 
 
-async def verify_password_async(password: str, password_hash: str) -> bool:
-    return await asyncio.to_thread(verify_password, password, password_hash)
+async def verify_password_async(password: str, password_hash: str, *, app=None) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash, app=app)
 
 
 def validate_password(password: str, min_length: int = 12) -> list[str]:

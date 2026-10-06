@@ -1,4 +1,6 @@
 import datetime
+import secrets
+import time
 from dataclasses import dataclass, field
 from itertools import count
 
@@ -110,8 +112,29 @@ class InMemoryDatastore:
         user.fs_uniquifier = uniquifier or user.fs_uniquifier
         return user.fs_uniquifier
 
+    def rotate_uniquifier(self, user, expected, replacement):
+        if user.fs_uniquifier != expected:
+            return False
+        user.fs_uniquifier = replacement
+        return True
+
     def commit(self):
         return None
+
+    def record_auth_failure(self, user, *, max_attempts, lockout_minutes):
+        user.failed_login_count = (user.failed_login_count or 0) + 1
+        if user.failed_login_count >= max_attempts:
+            from quart_security.utils import naive_utcnow
+
+            user.locked_until = naive_utcnow() + datetime.timedelta(
+                minutes=lockout_minutes
+            )
+
+    def replace_recovery_codes(self, user, expected, remaining):
+        if user.mf_recovery_codes != expected:
+            return False
+        user.mf_recovery_codes = remaining
+        return True
 
     def get_webauthn_credentials(self, user, usage=None):
         credentials = list(user.webauthn or [])
@@ -147,6 +170,30 @@ class InMemoryDatastore:
         return False
 
 
+class MemoryStateStore:
+    def __init__(self):
+        self.records = {}
+
+    async def put(self, payload, *, ttl, token=None):
+        token = token or secrets.token_urlsafe(32)
+        self.records[token] = (payload, time.time() + ttl)
+        return token
+
+    async def get(self, token):
+        record = self.records.get(token)
+        return record[0] if record and record[1] > time.time() else None
+
+    async def pop(self, token):
+        record = self.records.pop(token, None)
+        return record[0] if record and record[1] > time.time() else None
+
+    async def claim(self, token, *, ttl):
+        if await self.get(token) is not None:
+            return False
+        await self.put({}, ttl=ttl, token=token)
+        return True
+
+
 @pytest.fixture
 def datastore():
     return InMemoryDatastore()
@@ -176,19 +223,19 @@ def _build_app(
         SECURITY_PASSWORD_BREACH_CHECK=False,
     )
 
-    Security(app, datastore)
+    Security(app, datastore, state_store=MemoryStateStore())
 
     basic_user = datastore.create_user(
         fs_uniquifier="user-1",
         email="user@example.com",
-        password=hash_password("correct-password"),
+        password=hash_password("correct-password", app=app),
         active=True,
     )
 
     admin_user = datastore.create_user(
         fs_uniquifier="admin-1",
         email="admin@example.com",
-        password=hash_password("correct-password"),
+        password=hash_password("correct-password", app=app),
         active=True,
     )
 
@@ -243,3 +290,16 @@ def app_webauthn(datastore):
 @pytest.fixture
 def client_webauthn(app_webauthn):
     return app_webauthn.test_client()
+
+
+@pytest.fixture
+async def database(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy_models import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'auth.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield factory
+    await engine.dispose()

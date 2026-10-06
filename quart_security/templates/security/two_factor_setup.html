@@ -2,11 +2,24 @@
 <!doctype html>
 <title>Two-Factor Setup</title>
 <h1>Set up two-factor authentication</h1>
-<p>Scan this QR code in your authenticator app.</p>
-<img alt="TOTP QR" src="data:image/png;base64,{{ tf_qrcode }}" />
-<p>Or enter this secret manually: <code>{{ tf_secret }}</code></p>
+{% if primary_method != 'none' %}
+<p>Authenticator is enabled.</p>
 <form method="post" action="{{ url_for_security('two_factor_setup') }}">
   {{ two_factor_setup_form.hidden_tag() }}
+  <input type="hidden" name="action" value="disable">
+  {{ render_input(two_factor_setup_form.token) }}
+  <button type="submit">Disable authenticator</button>
+</form>
+{% elif chosen_method == 'authenticator' %}
+<p>Scan this QR code in your authenticator app.</p>
+<img alt="TOTP QR" src="{{ authr_qrcode }}" />
+<p>Or enter this secret manually: <code>{{ authr_key }}</code></p>
+<form method="post" action="{{ url_for_security('two_factor_setup') }}">
+  {{ two_factor_setup_form.hidden_tag() }}
+  <input type="hidden" name="action" value="verify">
   {{ render_input(two_factor_setup_form.token) }}
   <button type="submit">Verify and enable</button>
 </form>
+{% else %}
+<a href="{{ url_for_security('two_factor_setup', setup='authenticator') }}">Set up authenticator</a>
+{% endif %}

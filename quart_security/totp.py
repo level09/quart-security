@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import io
 import secrets
+import time
 
 
 def _require_pyotp():
@@ -41,9 +42,17 @@ def generate_qr_code(uri: str) -> str:
 
 
 def verify_totp(secret: str, token: str) -> bool:
+    return matching_totp_step(secret, token) is not None
+
+
+def matching_totp_step(secret: str, token: str) -> int | None:
     pyotp = _require_pyotp()
     totp = pyotp.TOTP(secret)
-    return bool(totp.verify(token, valid_window=1))
+    step = int(time.time()) // totp.interval
+    for candidate in (step + 1, step, step - 1):
+        if totp.verify(token, for_time=candidate * totp.interval):
+            return candidate
+    return None
 
 
 def generate_recovery_codes(n: int = 3) -> list[str]:

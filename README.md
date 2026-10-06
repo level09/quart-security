@@ -61,7 +61,9 @@ Package build backend: `flit`.
 from quart import Quart
 from quart_security import Security, SQLAlchemyUserDatastore
 
-# your models should include fields used by auth, roles, and MFA/WebAuthn
+import os
+
+# Models must include the fields required by enabled features.
 from myapp.models import db, User, Role, WebAuthnCredential
 
 
@@ -69,8 +71,7 @@ def create_app():
     app = Quart(__name__)
 
     app.config.update(
-        SECRET_KEY="change-me",
-        SECURITY_PASSWORD_SALT="change-me-too",
+        SECRET_KEY=os.environ["SECRET_KEY"],
         SECURITY_POST_LOGIN_VIEW="/dashboard",
         SECURITY_POST_REGISTER_VIEW="/login",
     )
@@ -104,7 +105,7 @@ For tracking / MFA / WebAuthn features:
 - `fs_webauthn_user_handle`
 - relationship/association for stored WebAuthn credentials
 
-Optional for lockout support:
+Required for the default lockout policy:
 - `failed_login_count`
 - `locked_until`
 
@@ -112,13 +113,17 @@ These fields are required when login or MFA lockout is enabled. The built-in
 counter limits account-level guesses. Deploy an application or edge rate limiter
 for source IP and distributed abuse controls.
 
+The database must enforce unique normalized emails, `fs_uniquifier` values,
+WebAuthn user handles, and credential IDs. Use a stable primary key separate from
+`fs_uniquifier`: this value changes when security settings change.
+
 ## Key Configuration
 
 The extension uses `SECURITY_*` keys for migration-friendly configuration.
 
 Core:
 - `SECURITY_PASSWORD_HASH` (default: `argon2` / argon2id; set to `pbkdf2_sha512` to keep old behavior)
-- `SECURITY_PASSWORD_SALT` (recommended)
+- `SECURITY_PASSWORD_SALT` (legacy salted-hash verification only)
 - `SECURITY_PASSWORD_LENGTH_MIN` (default: `12`)
 - `SECURITY_PASSWORD_BREACH_CHECK` (default: `True`) - HIBP k-anonymity check on register/change
 - `SECURITY_PASSWORD_BREACH_COUNT_MIN` (default: `1`) - minimum breach count to reject
@@ -129,6 +134,7 @@ Core:
 - `SECURITY_CHANGEABLE`
 - `SECURITY_TRACKABLE`
 - `SECURITY_CSRF_PROTECT` (default: `True`)
+- `SECURITY_COOKIE_SECURE` (default: `True`; sets `SESSION_COOKIE_SECURE`)
 - `SECURITY_FRESHNESS` (default: `60` minutes)
 
 Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
@@ -142,6 +148,10 @@ Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 def
 Recovery codes are displayed only when generated and are stored as keyed hashes.
 Existing plaintext codes remain valid until their next successful use, when the
 remaining codes are migrated.
+
+Accepted TOTP time steps, recovery codes, and WebAuthn challenges cannot be reused.
+Disabling an authenticator requires a current TOTP or unused recovery code.
+Wait for the next TOTP code if the current one was just used to sign in.
 
 WebAuthn:
 - `SECURITY_WEBAUTHN`
@@ -239,3 +249,81 @@ Run this in a HTTPS staging environment with production-like hostnames and real 
 - Run behind HTTPS for WebAuthn in non-local environments.
 - Set explicit WebAuthn RP values (`SECURITY_WAN_RP_ID`, `SECURITY_WAN_EXPECTED_ORIGIN`) when behind proxies or multiple domains.
 - Keep CSRF protection enabled unless you have a deliberate replacement.
+
+## Version 2.0.0 migration
+
+This update requires a shared `quart_security_state` table. It stores expiring
+authentication records and verification state. Cookie contents contain opaque
+references, not pending authenticator secrets. All workers must use the same
+database. Existing login cookies are rejected after this update.
+
+Create the table through your application's database migration before deploying
+the new library. For example, in an Alembic migration:
+
+```python
+from alembic import op
+from quart_security import SecurityState
+
+
+def upgrade():
+    SecurityState.__table__.create(op.get_bind())
+```
+
+This includes the expiry index. Startup checks that the table is present. Protect
+database access and backups because pending TOTP secrets are stored there.
+Expired records are removed when new state is written. Maintenance jobs can also
+call `await security.state_store.purge_expired()` in an application context and
+close the datastore after the job.
+
+For a session factory, use `async_sessionmaker(engine, expire_on_commit=False)`.
+The library retains the session through commits and closes factory-owned sessions
+at the end of each HTTP request or WebSocket connection. Read-only and failed
+requests also close their sessions. A supplied `db.session` or session instance
+remains owned by the host application; the host must close or roll it back.
+Outside a request, close factory-owned sessions with `await datastore.close()`.
+Do not share one session across concurrent tasks.
+
+Password and MFA profile changes rotate the user's `fs_uniquifier`, which rejects
+older authenticated and pending login sessions. Logout revokes the current
+authentication record, including copied cookies for that session. Password
+changes keep the requesting session authenticated. Passkey registration and
+deletion also revoke older sessions. A `secondary` passkey cannot perform
+passwordless sign-in. A primary passkey uses its own user verification and does
+not require the account's TOTP code.
+
+Password helpers now use the current application's settings. Outside an app
+context, pass `app=app`, for example `hash_password(password, app=app)`.
+
+Cookies default to Secure, HttpOnly, and SameSite=Lax. For local HTTP development
+only, set `SECURITY_COOKIE_SECURE=False`. An explicit SameSite value is preserved.
+Use a strong random secret key and explicit RP/origin settings behind proxies.
+The host still needs source-IP and global rate limits; account lockout does not
+limit registration or anonymous challenge generation. Lockout fields are required
+when `SECURITY_LOGIN_MAX_ATTEMPTS` is greater than zero. Setting it to zero
+explicitly disables account lockout.
+
+Custom datastores require a shared `state_store` passed to `Security`. Its async
+methods must implement this contract and propagate storage errors:
+
+| Method | Contract |
+| --- | --- |
+| `put(payload, ttl=seconds, token=None)` | Persist a dictionary with an expiry and return an unpredictable reference. |
+| `get(token)` | Return unexpired state or None. |
+| `pop(token)` | Atomically consume unexpired state; exactly one caller receives it. |
+| `claim(token, ttl=seconds)` | Atomically reserve a key; return False while another unexpired claim exists. |
+
+A process-local dictionary is suitable only for tests. Custom datastores must also
+provide `record_auth_failure(user, max_attempts=..., lockout_minutes=...)` as an
+atomic increment/lock update and
+`replace_recovery_codes(user, expected, remaining)` as an atomic conditional
+replacement returning a boolean. `rotate_uniquifier(user, expected, replacement)`
+must atomically check the old value and persist both the new value and staged
+profile changes. Return False and roll back staged changes when the old value no
+longer matches. Concurrent profile updates return HTTP 409; the user must sign in
+again. Persist these changes before returning. The
+extension fails at initialization if an enabled control lacks its required hook
+or SQLAlchemy model fields.
+
+Dependencies now include the Pillow, bcrypt, and SQLAlchemy asyncio extras and patched
+minimum versions of aiosmtplib, cryptography, and cbor2. The release workflow runs
+lint and tests before building and publishing. CI tests Python 3.11 through 3.14.

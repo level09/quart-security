@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from datetime import timedelta
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import String, case, cast, func, inspect, literal, select, update
+from sqlalchemy.orm import selectinload
+
+from .utils import naive_utcnow
 
 
 class SQLAlchemyUserDatastore:
@@ -23,22 +27,35 @@ class SQLAlchemyUserDatastore:
         source = self.session_factory
         configured = getattr(source, "session", None)
         if configured is not None:
-            return configured
-        active = self._active_session.get()
-        if active is None:
-            active = source() if callable(source) else source
-            self._active_session.set(active)
+            active = configured
+        else:
+            active = self._active_session.get()
+            if active is None:
+                active = source() if callable(source) else source
+                self._active_session.set(active)
+        sync_session = getattr(active, "sync_session", None)
+        if sync_session is not None and sync_session.expire_on_commit:
+            raise RuntimeError("Configure AsyncSession with expire_on_commit=False")
         return active
 
     async def _first(self, model, **kwargs):
-        stmt = select(model).filter_by(**kwargs)
+        stmt = self._select(model).filter_by(**kwargs)
         result = await self.session.execute(stmt)
         return result.scalars().first()
 
     async def _all(self, model, **kwargs):
-        stmt = select(model).filter_by(**kwargs)
+        stmt = self._select(model).filter_by(**kwargs)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    def _select(model):
+        stmt = select(model)
+        relationships = inspect(model).relationships
+        for name in ("roles", "webauthn", "user"):
+            if name in relationships:
+                stmt = stmt.options(selectinload(getattr(model, name)))
+        return stmt
 
     async def find_user(self, **kwargs):
         return await self._first(self.user_model, **kwargs)
@@ -100,6 +117,61 @@ class SQLAlchemyUserDatastore:
         user.fs_uniquifier = uniquifier or uuid4().hex
         self.session.add(user)
         return user.fs_uniquifier
+
+    async def rotate_uniquifier(self, user, expected, replacement):
+        # Acquire the account update before autoflush can overwrite newer state.
+        with self.session.no_autoflush:
+            result = await self.session.execute(
+                update(self.user_model)
+                .where(self.user_model.fs_uniquifier == expected)
+                .values(fs_uniquifier=replacement)
+                .execution_options(synchronize_session=False)
+            )
+        if result.rowcount != 1:
+            await self.session.rollback()
+            return False
+        user.fs_uniquifier = replacement
+        await self.commit()
+        return True
+
+    async def record_auth_failure(self, user, *, max_attempts, lockout_minutes):
+        model = self.user_model
+        count = func.coalesce(model.failed_login_count, 0) + 1
+        await self.session.execute(
+            update(model)
+            .where(model.fs_uniquifier == user.fs_uniquifier)
+            .values(
+                failed_login_count=count,
+                locked_until=case(
+                    (
+                        count >= max_attempts,
+                        naive_utcnow() + timedelta(minutes=lockout_minutes),
+                    ),
+                    else_=model.locked_until,
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await self.commit()
+        await self.session.refresh(user, ["failed_login_count", "locked_until"])
+
+    async def replace_recovery_codes(self, user, expected, remaining):
+        model = self.user_model
+        codes = model.mf_recovery_codes
+        # Casting both sides supports JSON, JSONB, and array column types.
+        result = await self.session.execute(
+            update(model)
+            .where(
+                model.fs_uniquifier == user.fs_uniquifier,
+                cast(codes, String)
+                == cast(literal(expected, type_=codes.type), String),
+            )
+            .values(mf_recovery_codes=remaining)
+            .execution_options(synchronize_session=False)
+        )
+        await self.commit()
+        await self.session.refresh(user, ["mf_recovery_codes"])
+        return result.rowcount == 1
 
     async def get_webauthn_credentials(self, user, usage=None):
         credentials = list(getattr(user, "webauthn", None) or [])
@@ -190,8 +262,15 @@ class SQLAlchemyUserDatastore:
         return True
 
     async def commit(self):
-        active = self.session
+        await self.session.commit()
+
+    def begin_request(self):
+        self._active_session.set(None)
+
+    async def close(self):
+        active = self._active_session.get()
         try:
-            await active.commit()
+            if active is not None and callable(self.session_factory):
+                await active.close()
         finally:
             self._active_session.set(None)

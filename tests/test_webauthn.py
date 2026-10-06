@@ -94,7 +94,9 @@ async def test_wan_signin_logs_in_with_passkey(
         usage="primary",
     )
 
-    async def fake_begin_authentication(credentials, rp_id, challenge):
+    async def fake_begin_authentication(
+        credentials, rp_id, challenge, require_user_verification=True
+    ):
         return {"challenge": challenge, "allow_credentials": []}
 
     def fake_options_to_json_dict(options):
@@ -162,7 +164,9 @@ async def test_wan_verify_updates_sign_count(
         usage="secondary",
     )
 
-    async def fake_begin_authentication(credentials, rp_id, challenge):
+    async def fake_begin_authentication(
+        credentials, rp_id, challenge, require_user_verification=True
+    ):
         return {"challenge": challenge, "credential_id": credentials[0].credential_id}
 
     def fake_options_to_json_dict(options):

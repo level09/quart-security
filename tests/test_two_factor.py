@@ -1,3 +1,4 @@
+import pyotp
 import pytest
 
 from quart_security import totp
@@ -15,18 +16,8 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
 ):
     user = app_two_factor.extensions["test_basic_user"]
 
-    monkeypatch.setattr(totp, "generate_totp_secret", lambda: "test-secret")
-    monkeypatch.setattr(
-        totp,
-        "get_totp_uri",
-        lambda secret, email, issuer: "otpauth://totp/test",
-    )
-    monkeypatch.setattr(totp, "generate_qr_code", lambda uri: "qr-data")
-    monkeypatch.setattr(
-        totp,
-        "verify_totp",
-        lambda secret, token: secret == "test-secret" and token == "123456",
-    )
+    secret = pyotp.random_base32()
+    monkeypatch.setattr(totp, "generate_totp_secret", lambda: secret)
 
     await client_two_factor.post(
         "/login",
@@ -38,13 +29,13 @@ async def test_two_factor_setup_enables_totp_and_recovery_codes(
 
     post_response = await client_two_factor.post(
         "/tf-setup",
-        form={"action": "verify", "token": "123456"},
+        form={"action": "verify", "token": pyotp.TOTP(secret).now()},
     )
 
     assert post_response.status_code == 200
     assert "Recovery codes" in await post_response.get_data(as_text=True)
     assert user.tf_primary_method == "authenticator"
-    assert user.tf_totp_secret == "test-secret"
+    assert user.tf_totp_secret == secret
     assert (
         len(user.mf_recovery_codes or [])
         == app_two_factor.config["SECURITY_MULTI_FACTOR_RECOVERY_CODES_N"]
@@ -57,13 +48,7 @@ async def test_login_requires_second_factor_then_allows_access(
 ):
     user = app_two_factor.extensions["test_basic_user"]
     user.tf_primary_method = "authenticator"
-    user.tf_totp_secret = "existing-secret"
-
-    monkeypatch.setattr(
-        totp,
-        "verify_totp",
-        lambda secret, token: secret == "existing-secret" and token == "123456",
-    )
+    user.tf_totp_secret = pyotp.random_base32()
 
     login = await client_two_factor.post(
         "/login",
@@ -81,7 +66,9 @@ async def test_login_requires_second_factor_then_allows_access(
     )
     assert invalid_code.status_code == 200
 
-    valid_code = await client_two_factor.post("/tf-validate", form={"token": "123456"})
+    valid_code = await client_two_factor.post(
+        "/tf-validate", form={"token": pyotp.TOTP(user.tf_totp_secret).now()}
+    )
     assert valid_code.status_code == 302
     assert valid_code.headers["Location"].endswith("/protected")
 
@@ -192,11 +179,10 @@ def test_legacy_recovery_codes_are_migrated_without_double_hashing():
 async def test_recovery_regeneration_form_has_csrf_token(
     client_two_factor, app_two_factor
 ):
+    await client_two_factor.post(
+        "/login", form={"email": "user@example.com", "password": "correct-password"}
+    )
     app_two_factor.config["SECURITY_CSRF_PROTECT"] = True
-    async with client_two_factor.session_transaction() as sess:
-        sess["_user_id"] = "user-1"
-        sess["_fresh"] = True
-        sess["_auth_at"] = 9999999999
 
     response = await client_two_factor.get("/mf-recovery-codes")
     body = await response.get_data(as_text=True)

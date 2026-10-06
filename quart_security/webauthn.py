@@ -124,11 +124,18 @@ async def complete_registration(
     }
 
 
-async def begin_authentication(credentials, rp_id, challenge: bytes):
+async def begin_authentication(
+    credentials, rp_id, challenge: bytes, require_user_verification=True
+):
     api = _require_webauthn()
     return api["generate_authentication_options"](
         rp_id=rp_id,
         challenge=challenge,
+        user_verification=(
+            api["UserVerificationRequirement"].REQUIRED
+            if require_user_verification
+            else api["UserVerificationRequirement"].PREFERRED
+        ),
         allow_credentials=[
             api["PublicKeyCredentialDescriptor"](id=item.credential_id)
             for item in credentials

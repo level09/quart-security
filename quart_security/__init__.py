@@ -18,11 +18,14 @@ from .signals import (
     user_logged_out,
     user_registered,
 )
+from .state import SecurityState, SQLAlchemyStateStore
 from .utils import url_for_security
 
 __all__ = [
     "Security",
     "SQLAlchemyUserDatastore",
+    "SecurityState",
+    "SQLAlchemyStateStore",
     "auth_required",
     "roles_required",
     "UserMixin",
