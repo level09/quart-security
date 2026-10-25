@@ -4,7 +4,7 @@ import secrets
 
 from markupsafe import Markup, escape
 from quart import request
-from wtforms import BooleanField, PasswordField, RadioField, StringField
+from wtforms import BooleanField, PasswordField, RadioField, SelectChoice, StringField
 from wtforms.form import Form
 from wtforms.validators import DataRequired, Email, EqualTo, Optional
 
@@ -99,8 +99,8 @@ class WebAuthnRegisterForm(QuartForm):
     usage = RadioField(
         "Usage",
         choices=[
-            ("secondary", "Multi-factor only"),
-            ("primary", "Passwordless sign-in"),
+            SelectChoice("secondary", "Multi-factor only"),
+            SelectChoice("primary", "Passwordless sign-in"),
         ],
         default="secondary",
         validators=[DataRequired()],
