@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
-import httpx
+import httpx2
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ async def password_is_breached(password: str, *, count_min: int = 1) -> bool | N
     prefix, suffix = sha1[:5], sha1[5:]
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with httpx2.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.get(
                 _HIBP_URL.format(prefix=prefix),
                 headers={"Add-Padding": "true"},
