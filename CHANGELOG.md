@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.5] - 2026-10-31
+
+### Security
+
+- Login verifies a password hash even when the email has no account or the
+  account is inactive, so response time no longer reveals which emails are
+  registered. A locked account still says it is locked.
+- Passkey registration refuses a credential ID that another user already
+  holds. Sign-in finds a credential's owner by its ID alone, and a software
+  authenticator can choose any ID; before, only the registering user's own
+  credentials were checked, leaving the database constraint as the only guard.
+
 ## [2.0.4] - 2026-10-31
 
 ### Fixed
