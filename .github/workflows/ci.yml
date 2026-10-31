@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  # The release gate in publish.yml runs this before publishing.
+  workflow_call:
 
 jobs:
   test:
