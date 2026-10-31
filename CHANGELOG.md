@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.1.0] - 2026-10-31
+
+### Added
+
+- Password reset by email (`SECURITY_RECOVERABLE`): `/reset` and
+  `/reset/<token>`. Links are single use, expire after one hour, and die if the
+  account's email or password changes first. Only token hashes are stored, and
+  opening a link does not spend it. A reset signs out every session, clears a
+  lockout and confirms the email.
+- Email confirmation (`SECURITY_CONFIRMABLE`): self-registered accounts sign in
+  only after confirming. The link opens a page with a button, so mail scanners
+  cannot confirm an account someone else registered. `/confirm` resends it.
+- Links in email come from the new `SECURITY_PUBLIC_URL`, never the Host
+  header. Startup fails if a flow that sends mail is on without it.
+- `Security(..., send_mail=fn)` replaces how mail is sent.
+
+### Security
+
+- With confirmation on, registering an email and then trying its password no
+  longer reveals whether the account already existed.
+- A locked account now fails login with the same message as a wrong password,
+  after the same work, instead of saying it is locked.
+- Failed-login counting, and the lookups, token writes, account creation and
+  mail of the new flows, run after the response, so their timing no longer
+  depends on whether an email has an account. With confirmation on,
+  `user_registered` and `user_register_conflict` therefore fire after the
+  response, in an app context without a request.
+
+### Fixed
+
+- Two registrations racing for the same new email no longer fail with a
+  unique-constraint error; the loser is treated as a conflict.
+
 ## [2.0.6] - 2026-10-31
 
 ### Security
