@@ -139,6 +139,8 @@ Core:
 
 Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
 
+Until then, a failed login for an account with a legacy hash takes a different time than one for an unknown email, which is checked against an argon2id dummy, so timing can reveal that the account exists. Apps that import hashes from another system should require a password reset rather than leave them in place.
+
 2FA:
 - `SECURITY_TWO_FACTOR`
 - `SECURITY_TOTP_ISSUER`
@@ -165,6 +167,10 @@ WebAuthn:
 Routing:
 - `SECURITY_POST_LOGIN_VIEW`
 - `SECURITY_POST_REGISTER_VIEW`
+
+A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it.
+
+Registration answers the same way whether or not the email already has an account, so it cannot be used to find accounts. For an existing email nothing is created and `user_register_conflict` fires with the existing user; send the owner a notice from it in the background, because a receiver that waits on mail slows only that response.
 
 ## Route Map
 
@@ -215,6 +221,7 @@ from quart_security import (
     password_changed,
     tf_profile_changed,
     user_registered,
+    user_register_conflict,
     url_for_security,
 )
 ```

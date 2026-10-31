@@ -16,6 +16,7 @@ from .signals import (
     tf_profile_changed,
     user_authenticated,
     user_logged_out,
+    user_register_conflict,
     user_registered,
 )
 from .state import SecurityState, SQLAlchemyStateStore
@@ -40,5 +41,6 @@ __all__ = [
     "password_changed",
     "tf_profile_changed",
     "user_registered",
+    "user_register_conflict",
     "url_for_security",
 ]

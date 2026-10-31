@@ -80,6 +80,23 @@ async def test_login_requires_second_factor_then_allows_access(
 
 
 @pytest.mark.asyncio
+async def test_next_survives_the_second_factor(client_two_factor, app_two_factor):
+    user = app_two_factor.extensions["test_basic_user"]
+    user.tf_primary_method = "authenticator"
+    user.tf_totp_secret = pyotp.random_base32()
+
+    await client_two_factor.get("/login?next=/%3Ftab%3D2")
+    await client_two_factor.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    valid_code = await client_two_factor.post(
+        "/tf-validate", form={"token": pyotp.TOTP(user.tf_totp_secret).now()}
+    )
+    assert valid_code.headers["Location"] == "/?tab=2"
+
+
+@pytest.mark.asyncio
 async def test_two_factor_recovery_code_login_consumes_code(
     client_two_factor, app_two_factor
 ):

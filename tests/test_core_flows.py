@@ -1,6 +1,8 @@
+import time
+
 import pytest
 
-from quart_security import verify_password
+from quart_security import user_register_conflict, verify_password, views
 from quart_security.views import _safe_redirect_target
 
 
@@ -38,22 +40,52 @@ async def test_login_accepts_email_case_and_surrounding_spaces(client):
 
 
 @pytest.mark.asyncio
-async def test_register_duplicate_email_returns_form(client, app):
+async def test_register_with_an_existing_email_looks_like_success(client, app):
     datastore = app.extensions["test_datastore"]
     existing = len(datastore.users)
+    owner = datastore.find_user(email="user@example.com")
+    conflicts = []
 
+    async def record(sender, user):
+        conflicts.append(user)
+
+    form = {
+        "email": "User@Example.com",
+        "password": "new-password-123",
+        "password_confirm": "new-password-123",
+    }
+    with user_register_conflict.connected_to(record):
+        duplicate = await client.post("/register", form=form)
+    fresh = await client.post("/register", form={**form, "email": "fresh@example.com"})
+
+    assert duplicate.status_code == fresh.status_code == 302
+    assert duplicate.headers["Location"] == fresh.headers["Location"]
+    assert len(datastore.users) == existing + 1
+    assert conflicts == [owner]
+    assert verify_password("correct-password", owner.password, app=app)
+
+
+@pytest.mark.asyncio
+async def test_login_returns_to_the_page_that_asked(client):
+    await client.get("/login?next=/%3Ftab%3D2")
     response = await client.post(
-        "/register",
-        form={
-            "name": "Duplicate",
-            "email": "user@example.com",
-            "password": "new-password-123",
-            "password_confirm": "new-password-123",
-        },
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
     )
+    assert response.headers["Location"] == "/?tab=2"
 
-    assert response.status_code == 200
-    assert len(datastore.users) == existing
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["//evil.example", "https://evil.example/", ""])
+async def test_login_ignores_unsafe_or_stale_next(client, target):
+    await client.get("/login?next=/%3Fold")
+    # A later visit replaces the earlier target, even with no or an unsafe one.
+    await client.get(f"/login?next={target}")
+    response = await client.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    assert response.headers["Location"].endswith("/protected")
 
 
 @pytest.mark.asyncio
@@ -227,3 +259,15 @@ def test_safe_redirect_blocks_backslash():
 def test_safe_redirect_blocks_control_chars():
     assert _safe_redirect_target("/path\x00evil") == "/"
     assert _safe_redirect_target("/path\nevil") == "/"
+
+
+@pytest.mark.asyncio
+async def test_login_ignores_a_next_older_than_the_login_attempt(client, monkeypatch):
+    await client.get("/login?next=/%3Fold")
+    later = time.time() + views.NEXT_TTL_SECONDS + 1
+    monkeypatch.setattr(views.time, "time", lambda: later)
+    response = await client.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    assert response.headers["Location"].endswith("/protected")

@@ -42,7 +42,12 @@ from .password import (
     verify_password_async,
 )
 from .proxies import _security, current_user
-from .signals import password_changed, tf_profile_changed, user_registered
+from .signals import (
+    password_changed,
+    tf_profile_changed,
+    user_register_conflict,
+    user_registered,
+)
 from .utils import maybe_await, naive_utcnow, url_for_security
 
 security_bp = Blueprint("security", __name__, template_folder="templates")
@@ -145,6 +150,22 @@ def _safe_redirect_target(candidate: str | None, fallback: str = "/") -> str:
     if not candidate.startswith("/") or candidate.startswith("//"):
         return fallback
     return candidate
+
+
+# A login that finishes later than this after the form was shown ignores its
+# `next`, so an abandoned target cannot redirect an unrelated later sign-in.
+NEXT_TTL_SECONDS = 600
+
+
+async def _complete_login(user):
+    """Log the user in and send them where `/login?next=` asked, if it was safe."""
+    # login_user clears the session, so read the target first.
+    target, stored_at = session.pop("security_next", None) or (None, 0)
+    if time.time() - stored_at > NEXT_TTL_SECONDS:
+        target = None
+    await _security.login_user(user)
+    fallback = _resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login")
+    return redirect(_safe_redirect_target(target, fallback=fallback))
 
 
 def _webauthn_rp_id() -> str:
@@ -349,6 +370,14 @@ def _format_webauthn_credential(credential) -> dict:
 async def login():
     form = await _security.login_form_cls.from_formdata()
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+    if not _is_post():
+        # Every visit to the form replaces the target, so an abandoned one never
+        # redirects a later login. The passkey and 2FA paths finish with it too.
+        next_url = _safe_redirect_target(request.args.get("next"), fallback="")
+        if next_url:
+            session["security_next"] = [next_url, int(time.time())]
+        else:
+            session.pop("security_next", None)
 
     if _is_post() and form.validate():
         user = await _find_user(email=_normalize_email(form.email.data))
@@ -387,8 +416,7 @@ async def login():
                 return redirect(url_for_security("two_factor_token_validation"))
 
             await _reset_auth_failures(user)
-            await _security.login_user(user)
-            return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
+            return await _complete_login(user)
 
         # Track failed login
         if user:
@@ -409,12 +437,9 @@ async def register():
 
     if _is_post() and form.validate():
         email = _normalize_email(form.email.data)
-        if await _find_user(email=email):
-            await flash("A user with this email already exists", "error")
-            return await render_template(
-                "security/register_user.html", register_user_form=form
-            )
-
+        # Password checks come first and an existing email gets the same answer as
+        # a new one, after the same hashing work, so the form never reveals which
+        # emails have an account.
         errors = validate_password(
             form.password.data,
             min_length=current_app.config.get("SECURITY_PASSWORD_LENGTH_MIN", 12),
@@ -441,20 +466,22 @@ async def register():
                     "security/register_user.html", register_user_form=form
                 )
 
-        user_kwargs = {
-            "email": email,
-            "password": await hash_password_async(form.password.data),
-            "active": True,
-        }
-        if hasattr(form, "name") and form.name.data:
-            user_kwargs["name"] = form.name.data.strip()
+        password = await hash_password_async(form.password.data)
+        app = current_app._get_current_object()
+        existing = await _find_user(email=email)
+        if existing:
+            await user_register_conflict.send_async(app, user=existing)
+        else:
+            user_kwargs = {"email": email, "password": password, "active": True}
+            if hasattr(form, "name") and form.name.data:
+                user_kwargs["name"] = form.name.data.strip()
 
-        user = await _create_user(**user_kwargs)
-        if hasattr(user, "confirmed_at"):
-            user.confirmed_at = naive_utcnow()
+            user = await _create_user(**user_kwargs)
+            if hasattr(user, "confirmed_at"):
+                user.confirmed_at = naive_utcnow()
 
-        await _commit()
-        await user_registered.send_async(current_app._get_current_object(), user=user)
+            await _commit()
+            await user_registered.send_async(app, user=user)
 
         await flash("Registration successful. Please log in.", "success")
         return redirect(_resolve_redirect("SECURITY_POST_REGISTER_VIEW", "login"))
@@ -720,8 +747,7 @@ async def two_factor_token_validation():
                 return redirect(url_for_security("login"))
             session.pop("tf_user_id", None)
             await _reset_auth_failures(user)
-            await _security.login_user(user)
-            return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
+            return await _complete_login(user)
 
         await _record_auth_failure(user)
         await flash("Invalid code", "error")
@@ -808,8 +834,7 @@ async def mf_recovery():
                 return redirect(url_for_security("login"))
             session.pop("tf_user_id", None)
             await _reset_auth_failures(user)
-            await _security.login_user(user)
-            return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
+            return await _complete_login(user)
 
         await _record_auth_failure(user)
         await flash("Invalid recovery code", "error")
@@ -1062,8 +1087,7 @@ async def wan_signin_response():
     if hasattr(stored_credential, "lastuse_datetime"):
         stored_credential.lastuse_datetime = naive_utcnow()
 
-    await _security.login_user(user)
-    return redirect(_resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login"))
+    return await _complete_login(user)
 
 
 @security_bp.route("/wan-verify", methods=["GET", "POST"])
