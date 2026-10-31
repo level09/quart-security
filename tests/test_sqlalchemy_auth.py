@@ -17,6 +17,7 @@ from quart_security import (
     auth_required,
     hash_password,
     roles_required,
+    views,
 )
 from quart_security.totp import decrypt_totp_secret
 
@@ -230,3 +231,31 @@ async def test_concurrent_enrollment_has_one_winner(sql_app, database, monkeypat
         )
     )
     assert sorted(result.status_code for result in results) == [200, 409]
+
+
+async def test_registration_that_loses_the_insert_race_looks_like_success(
+    sql_app, monkeypatch
+):
+    real_find = views._find_user
+    calls = []
+
+    async def miss_first_lookup(**kwargs):
+        # The first lookup runs before a concurrent request commits the email.
+        calls.append(kwargs)
+        return None if len(calls) == 1 else await real_find(**kwargs)
+
+    monkeypatch.setattr(views, "_find_user", miss_first_lookup)
+    sql_app.config["SECURITY_REGISTERABLE"] = True
+    client = sql_app.test_client()
+    token = await csrf(client, "/register")
+    response = await client.post(
+        "/register",
+        form={
+            "email": "user@example.com",
+            "password": "another-password-123",
+            "password_confirm": "another-password-123",
+            "csrf_token": token,
+        },
+    )
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")

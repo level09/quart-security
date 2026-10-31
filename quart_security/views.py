@@ -9,6 +9,7 @@ import hmac
 import json
 import secrets
 import time
+import uuid
 from urllib.parse import urlsplit
 
 from quart import (
@@ -21,6 +22,7 @@ from quart import (
     request,
     session,
 )
+from sqlalchemy.exc import IntegrityError
 from werkzeug.routing import BuildError
 
 from . import webauthn as wan
@@ -103,6 +105,12 @@ async def _record_auth_failure(user):
     )
 
 
+async def _record_failure_job(user_id):
+    user = await _find_user(fs_uniquifier=user_id)
+    if user is not None:
+        await _record_auth_failure(user)
+
+
 async def _reset_auth_failures(user):
     if hasattr(user, "failed_login_count"):
         user.failed_login_count = 0
@@ -166,6 +174,112 @@ async def _complete_login(user):
     await _security.login_user(user)
     fallback = _resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login")
     return redirect(_safe_redirect_target(target, fallback=fallback))
+
+
+RESET_SUBJECT = "Reset your password"
+RESET_NOTICE_SUBJECT = "Your password was reset"
+CONFIRM_SUBJECT = "Confirm your email address"
+REGISTER_CONFLICT_SUBJECT = "Sign-up attempt with your email"
+
+
+def _public_url(endpoint: str, **values) -> str:
+    """An absolute link for email, from SECURITY_PUBLIC_URL and never the Host
+    header, which whoever triggers the mail controls."""
+    base = current_app.config.get("SECURITY_PUBLIC_URL")
+    if not base:
+        raise RuntimeError("SECURITY_PUBLIC_URL is required to build email links")
+    return base.rstrip("/") + url_for_security(endpoint, **values)
+
+
+def _token_key(raw: str) -> str:
+    # Only the hash is stored, so a copy of the state table cannot replay links.
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _password_fingerprint(user) -> str:
+    # Ties a reset link to the password it replaces: any change voids the link.
+    return hashlib.sha256((user.password or "").encode()).hexdigest()
+
+
+def _new_link(endpoint: str) -> tuple[str, str]:
+    """A fresh single-use token and the emailed link that carries it. Built in
+    the request, where url_for works; stored later, only if an account needs it,
+    so making one costs the same whether or not the email has an account."""
+    raw = secrets.token_urlsafe(32)
+    return raw, _public_url(endpoint, token=raw)
+
+
+async def _store_link(raw: str, payload: dict, within: str):
+    ttl = int(current_app.config[within].total_seconds())
+    await _security.state_store.put(payload, ttl=ttl, token=_token_key(raw))
+
+
+def _defer(job, *args):
+    """Run `job(*args)` after the response, on its own datastore session. Work
+    that depends on whether an email has an account (lookups, token writes,
+    mail) happens here, so the response takes the same time either way."""
+    datastore = _security.datastore
+
+    async def run():
+        # The task inherits the request's context; give it its own session.
+        begin = getattr(datastore, "begin_request", None)
+        if begin:
+            begin()
+        try:
+            await job(*args)
+        finally:
+            close = getattr(datastore, "close", None)
+            if close:
+                await maybe_await(close())
+
+    current_app.add_background_task(run)
+
+
+async def _mail(template: str, subject: str, user, **context):
+    """Render security/email/<template>.txt and send it. Runs in a deferred job,
+    outside any request, so links arrive already built in `context`."""
+    found = current_app.jinja_env.get_template(f"security/email/{template}.txt")
+    body = await found.render_async(user=user, **context)
+    await _security.send_mail(subject, user.email, body)
+
+
+async def _send_confirmation_job(email: str, raw: str, link: str):
+    user = await _find_user(email=email)
+    if user is None or not getattr(user, "active", True):
+        return
+    if not _awaiting_confirmation(user):
+        return
+    await _store_confirmation(user, raw)
+    await _mail(
+        "confirmation_instructions", CONFIRM_SUBJECT, user, confirmation_link=link
+    )
+
+
+async def _store_confirmation(user, raw: str):
+    await _store_link(
+        raw,
+        {"confirm_user_id": user.get_id(), "email": user.email},
+        "SECURITY_CONFIRM_EMAIL_WITHIN",
+    )
+
+
+async def _password_errors(password: str) -> list[str]:
+    errors = validate_password(
+        password,
+        min_length=current_app.config.get("SECURITY_PASSWORD_LENGTH_MIN", 12),
+    )
+    if not errors and current_app.config.get("SECURITY_PASSWORD_BREACH_CHECK", True):
+        count_min = current_app.config.get("SECURITY_PASSWORD_BREACH_COUNT_MIN", 1)
+        if await password_is_breached(password, count_min=count_min):
+            errors = ["This password has appeared in a data breach. Choose another."]
+    return errors
+
+
+def _awaiting_confirmation(user) -> bool:
+    return bool(
+        current_app.config.get("SECURITY_CONFIRMABLE")
+        and getattr(user, "confirmed_at", None) is None
+    )
 
 
 def _webauthn_rp_id() -> str:
@@ -382,21 +496,25 @@ async def login():
     if _is_post() and form.validate():
         user = await _find_user(email=_normalize_email(form.email.data))
 
-        # Account lockout check
-        if user and hasattr(user, "locked_until") and user.locked_until:
-            if naive_utcnow() < user.locked_until:
-                await flash("Account temporarily locked. Try again later.", "error")
-                return await render_template(
-                    "security/login_user.html", login_user_form=form
-                )
+        # A locked account fails like a wrong password, after the same work: a
+        # distinct "locked" answer would only ever appear for real accounts.
+        locked = user is not None and _account_is_locked(user)
+        if user and not locked and getattr(user, "locked_until", None):
             # Lock expired, reset
             user.failed_login_count = 0
             user.locked_until = None
             await _commit()
 
         # Always run one verify, so response time does not reveal which emails
-        # have an active account.
-        known = user is not None and getattr(user, "active", True)
+        # have an active account. An unconfirmed account fails like an unknown
+        # one: otherwise registering an email and trying its password would
+        # tell whether the email already had an account.
+        known = (
+            user is not None
+            and getattr(user, "active", True)
+            and not _awaiting_confirmation(user)
+            and not locked
+        )
         password_ok = await verify_password_async(
             form.password.data,
             user.password if known else await unknown_user_hash_async(),
@@ -418,11 +536,19 @@ async def login():
             await _reset_auth_failures(user)
             return await _complete_login(user)
 
-        # Track failed login
-        if user:
-            await _record_auth_failure(user)
+        # Track failed login after the response: the write happens only for real
+        # accounts, and its time must not tell them apart.
+        if user and not locked:
+            _defer(_record_failure_job, user.get_id())
 
-        await flash("Invalid email or password", "error")
+        if current_app.config.get("SECURITY_CONFIRMABLE"):
+            # One message for every failure, so it never says which case applied.
+            await flash(
+                "Invalid email or password, or the email is not confirmed yet",
+                "error",
+            )
+        else:
+            await flash("Invalid email or password", "error")
 
     return await render_template("security/login_user.html", login_user_form=form)
 
@@ -440,10 +566,7 @@ async def register():
         # Password checks come first and an existing email gets the same answer as
         # a new one, after the same hashing work, so the form never reveals which
         # emails have an account.
-        errors = validate_password(
-            form.password.data,
-            min_length=current_app.config.get("SECURITY_PASSWORD_LENGTH_MIN", 12),
-        )
+        errors = await _password_errors(form.password.data)
         if errors:
             for error in errors:
                 await flash(error, "error")
@@ -451,42 +574,249 @@ async def register():
                 "security/register_user.html", register_user_form=form
             )
 
-        if current_app.config.get("SECURITY_PASSWORD_BREACH_CHECK", True):
-            count_min = current_app.config.get("SECURITY_PASSWORD_BREACH_COUNT_MIN", 1)
-            breached = await password_is_breached(
-                form.password.data, count_min=count_min
-            )
-            if breached:
-                await flash(
-                    "This password has appeared in a data breach."
-                    " Choose a different one.",
-                    "error",
-                )
-                return await render_template(
-                    "security/register_user.html", register_user_form=form
-                )
-
         password = await hash_password_async(form.password.data)
+        name = (form.name.data or "").strip() if hasattr(form, "name") else ""
         app = current_app._get_current_object()
-        existing = await _find_user(email=email)
-        if existing:
-            await user_register_conflict.send_async(app, user=existing)
+        confirmable = current_app.config.get("SECURITY_CONFIRMABLE")
+        if confirmable:
+            raw, confirm_link = _new_link("confirm_email")
+            recoverable = current_app.config.get("SECURITY_RECOVERABLE")
+            links = {
+                "confirm": confirm_link,
+                "login": _public_url("login"),
+                "reset": _public_url("forgot_password") if recoverable else None,
+            }
+            _defer(_register_job, app, email, password, name, raw, links)
         else:
-            user_kwargs = {"email": email, "password": password, "active": True}
-            if hasattr(form, "name") and form.name.data:
-                user_kwargs["name"] = form.name.data.strip()
+            # Without confirmation the new account signs in at once, which
+            # reveals it anyway; create it before answering.
+            await _register_job(app, email, password, name, None, {})
 
-            user = await _create_user(**user_kwargs)
-            if hasattr(user, "confirmed_at"):
-                user.confirmed_at = naive_utcnow()
-
-            await _commit()
-            await user_registered.send_async(app, user=user)
-
-        await flash("Registration successful. Please log in.", "success")
+        if confirmable:
+            await flash("Check your email to confirm your account.", "success")
+        else:
+            await flash("Registration successful. Please log in.", "success")
         return redirect(_resolve_redirect("SECURITY_POST_REGISTER_VIEW", "login"))
 
     return await render_template("security/register_user.html", register_user_form=form)
+
+
+async def _register_job(app, email, password, name, confirm_raw, links):
+    """Create the account, or tell the owner of the existing one. With
+    confirmation on this runs after the response, so neither case is slower."""
+    confirmable = confirm_raw is not None
+    existing = await _find_user(email=email)
+    if existing is None:
+        user_kwargs = {"email": email, "password": password, "active": True}
+        if name:
+            user_kwargs["name"] = name
+        user = await _create_user(**user_kwargs)
+        if hasattr(user, "confirmed_at"):
+            # Set either way: a model default must not confirm a sign-up.
+            user.confirmed_at = None if confirmable else naive_utcnow()
+        try:
+            await _commit()
+        except IntegrityError:
+            # Another request registered this email after the lookup above.
+            await maybe_await(_security.datastore.rollback())
+            existing = await _find_user(email=email)
+            if existing is None:
+                raise
+        else:
+            # Receivers run before the mail, so a mail failure cannot skip them;
+            # the owner can ask for a new link at /confirm.
+            await user_registered.send_async(app, user=user)
+            if confirmable:
+                await _store_confirmation(user, confirm_raw)
+                await _mail(
+                    "confirmation_instructions",
+                    CONFIRM_SUBJECT,
+                    user,
+                    confirmation_link=links["confirm"],
+                )
+    if existing is not None:
+        await user_register_conflict.send_async(app, user=existing)
+        if confirmable:
+            await _mail(
+                "register_conflict",
+                REGISTER_CONFLICT_SUBJECT,
+                existing,
+                login_link=links["login"],
+                reset_link=links["reset"],
+            )
+
+
+@security_bp.route("/reset", methods=["GET", "POST"])
+async def forgot_password():
+    if not current_app.config.get("SECURITY_RECOVERABLE"):
+        abort(404)
+    form = await _security.forgot_password_form_cls.from_formdata()
+    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+
+    if _is_post() and form.validate():
+        raw, link = _new_link("reset_password")
+        _defer(_reset_job, _normalize_email(form.email.data), raw, link)
+        await flash(
+            "If an account uses that email, a link to reset its password is on"
+            " its way.",
+            "info",
+        )
+        return redirect(url_for_security("login"))
+
+    return await render_template(
+        "security/forgot_password.html", forgot_password_form=form
+    )
+
+
+async def _reset_job(email: str, raw: str, link: str):
+    user = await _find_user(email=email)
+    if user is None or not getattr(user, "active", True):
+        return
+    await _store_link(
+        raw,
+        {
+            "reset_user_id": user.get_id(),
+            "email": user.email,
+            "password": _password_fingerprint(user),
+        },
+        "SECURITY_RESET_PASSWORD_WITHIN",
+    )
+    # To the stored address, never the one typed into the form.
+    await _mail("reset_instructions", RESET_SUBJECT, user, reset_link=link)
+
+
+async def _reset_link_user(state):
+    if not state or "reset_user_id" not in state:
+        return None
+    user = await _find_user(fs_uniquifier=state["reset_user_id"])
+    if user is None:
+        return None
+    # The identity map may hold the copy loaded earlier in this request; read
+    # the row again so an email or password changed meanwhile is seen.
+    refresh = getattr(_security.datastore, "refresh", None)
+    if refresh:
+        await maybe_await(refresh(user))
+    if not getattr(user, "active", True):
+        return None
+    # A changed email or password voids the link: it was sent to the old inbox.
+    if user.email != state["email"]:
+        return None
+    if not hmac.compare_digest(state["password"], _password_fingerprint(user)):
+        return None
+    return user
+
+
+@security_bp.route("/reset/<token>", methods=["GET", "POST"])
+async def reset_password(token):
+    if not current_app.config.get("SECURITY_RECOVERABLE"):
+        abort(404)
+    key = _token_key(token)
+    # A GET only looks: mail scanners open links, and must not spend the token.
+    user = await _reset_link_user(await _security.state_store.get(key))
+    if user is None:
+        await flash("This reset link is invalid or has expired.", "error")
+        return redirect(url_for_security("forgot_password"))
+
+    form = await _security.reset_password_form_cls.from_formdata()
+    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+    if _is_post() and form.validate():
+        errors = await _password_errors(form.password.data)
+        for error in errors:
+            await flash(error, "error")
+        if not errors:
+            # Hash first: the slow step must not sit between the final check of
+            # the account and the update that rotates it.
+            password = await hash_password_async(form.password.data)
+            if await _reset_link_user(await _security.state_store.pop(key)) is None:
+                await flash("This reset link is invalid or has expired.", "error")
+                return redirect(url_for_security("forgot_password"))
+            user.password = password
+            # The link reached the inbox, which is what confirmation proves.
+            if hasattr(user, "confirmed_at") and user.confirmed_at is None:
+                user.confirmed_at = naive_utcnow()
+            if hasattr(user, "failed_login_count"):
+                user.failed_login_count = 0
+                user.locked_until = None
+            # Signs out every session, including whoever knew the old password.
+            rotated = await maybe_await(
+                _security.datastore.rotate_uniquifier(
+                    user, user.get_id(), uuid.uuid4().hex
+                )
+            )
+            if not rotated:
+                abort(409)
+            app = current_app._get_current_object()
+            await password_changed.send_async(app, user=user)
+            _defer(_mail, "reset_notice", RESET_NOTICE_SUBJECT, user)
+            await flash("Your password was reset. Sign in with the new one.", "success")
+            return redirect(url_for_security("login"))
+
+    return await render_template(
+        "security/reset_password.html",
+        reset_password_form=form,
+        reset_password_token=token,
+    )
+
+
+def _confirmation_routes_enabled() -> bool:
+    # Only sign-ups wait for confirmation, so the routes exist only with sign-up.
+    config = current_app.config
+    return bool(
+        config.get("SECURITY_CONFIRMABLE") and config.get("SECURITY_REGISTERABLE")
+    )
+
+
+@security_bp.route("/confirm", methods=["GET", "POST"])
+async def send_confirmation():
+    if not _confirmation_routes_enabled():
+        abort(404)
+    form = await _security.send_confirmation_form_cls.from_formdata()
+    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+
+    if _is_post() and form.validate():
+        raw, link = _new_link("confirm_email")
+        _defer(_send_confirmation_job, _normalize_email(form.email.data), raw, link)
+        await flash(
+            "If that email is waiting to be confirmed, a new link is on its way.",
+            "info",
+        )
+        return redirect(url_for_security("login"))
+
+    return await render_template(
+        "security/send_confirmation.html", send_confirmation_form=form
+    )
+
+
+@security_bp.route("/confirm/<token>", methods=["GET", "POST"])
+async def confirm_email(token):
+    if not _confirmation_routes_enabled():
+        abort(404)
+    form = await QuartForm.from_formdata()
+    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+    # A GET only shows a button. Mail scanners open every link, and confirming
+    # on GET would let one confirm an account someone else registered with this
+    # address, keeping that person's password.
+    key = _token_key(token)
+    store = _security.state_store
+    state = await (store.pop(key) if _is_post() else store.get(key))
+    user = None
+    if state and "confirm_user_id" in state:
+        user = await _find_user(fs_uniquifier=state["confirm_user_id"])
+    # A link sent before an email change does not confirm the new address.
+    if user is None or user.email != state.get("email"):
+        await flash("This confirmation link is invalid or has expired.", "error")
+        return redirect(url_for_security("send_confirmation"))
+    if not _is_post():
+        return await render_template(
+            "security/confirm_email.html",
+            confirm_email_form=form,
+            confirm_email_token=token,
+        )
+    if user.confirmed_at is None:
+        user.confirmed_at = naive_utcnow()
+        await _commit()
+    await flash("Your email is confirmed. You can sign in now.", "success")
+    return redirect(url_for_security("login"))
 
 
 @security_bp.route("/logout", methods=["POST"])

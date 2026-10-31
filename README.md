@@ -137,6 +137,13 @@ Core:
 - `SECURITY_COOKIE_SECURE` (default: `True`; sets `SESSION_COOKIE_SECURE`)
 - `SECURITY_FRESHNESS` (default: `60` minutes)
 
+Password reset and email confirmation:
+- `SECURITY_RECOVERABLE` (default: `False`) - password reset by email at `/reset`
+- `SECURITY_CONFIRMABLE` (default: `False`) - self-registered accounts sign in only after confirming their email; needs a `confirmed_at` column
+- `SECURITY_PUBLIC_URL` (default: unset) - origin for links in email, e.g. `https://app.example.com`; required when either flow sends mail, and never taken from the request's Host header
+- `SECURITY_RESET_PASSWORD_WITHIN` (default: 1 hour)
+- `SECURITY_CONFIRM_EMAIL_WITHIN` (default: 1 day)
+
 Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
 
 Until then, a failed login for an account with a legacy hash takes a different time than one for an unknown email, which is checked against an argon2id dummy, so timing can reveal that the account exists. Apps that import hashes from another system should require a password reset rather than leave them in place.
@@ -170,7 +177,17 @@ Routing:
 
 A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it.
 
-Registration answers the same way whether or not the email already has an account, so it cannot be used to find accounts. For an existing email nothing is created and `user_register_conflict` fires with the existing user; send the owner a notice from it in the background, because a receiver that waits on mail slows only that response.
+Registration answers the same way whether or not the email already has an account. For an existing email nothing is created and `user_register_conflict` fires with the existing user. On its own that is not enough: someone can register an email and try to sign in with the password they chose, which works only if the account is new. Turn on `SECURITY_CONFIRMABLE` to close that gap.
+
+## Password reset and email confirmation
+
+With `SECURITY_RECOVERABLE`, `/reset` asks for an email and always gives the same answer. The link goes to the address stored on the account, works once, expires after `SECURITY_RESET_PASSWORD_WITHIN`, and stops working if the account's email or password changes first. Opening it only shows the form, so mail scanners cannot spend it. A reset rotates `fs_uniquifier`, which signs out every session, clears a lockout, confirms the email, fires `password_changed` and sends a notice.
+
+With `SECURITY_CONFIRMABLE` (and `SECURITY_REGISTERABLE`), a new account stores `confirmed_at = NULL` and cannot sign in until its owner opens the emailed link and presses the button on that page. The button is there because mail scanners open links: confirming on GET would let a scanner activate an account someone else registered with that address, with that person's password. Until then a login fails with the same message as a wrong password or a locked account, and `/confirm` sends a fresh link. Registering an existing email sends the owner a notice instead. Accounts created any other way should set `confirmed_at`; a column default does not work, because SQLAlchemy fills it in even when registration sets `None`.
+
+Only token hashes are stored. Lookups, token writes, account creation and mail for these flows run after the response through `app.add_background_task`, so response time does not depend on whether an email has an account. The same goes for counting failed logins. As a result, `user_registered` and `user_register_conflict` fire after the response when confirmation is on, in an app context with no request.
+
+Mail goes through `send_email` and the `MAIL_*` settings by default. Pass `Security(app, datastore, send_mail=fn)`, where `fn` is `async (subject, recipient, body)`, to use something else. Bodies come from `security/email/*.txt` templates, which the app can override.
 
 ## Route Map
 
@@ -179,6 +196,8 @@ Core:
 - `/register`
 - `/logout` (POST only)
 - `/change`
+- `/reset`, `/reset/<token>` (with `SECURITY_RECOVERABLE`)
+- `/confirm`, `/confirm/<token>` (with `SECURITY_CONFIRMABLE` and `SECURITY_REGISTERABLE`)
 
 2FA:
 - `/tf-setup`

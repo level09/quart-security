@@ -89,6 +89,25 @@ class ChangePasswordForm(QuartForm):
     )
 
 
+class EmailForm(QuartForm):
+    """One email field: asks for a password reset or a new confirmation link."""
+
+    email = StringField(
+        "Email", filters=[_strip_email], validators=[DataRequired(), Email()]
+    )
+
+
+class ResetPasswordForm(QuartForm):
+    password = PasswordField("New Password", validators=[DataRequired()])
+    password_confirm = PasswordField(
+        "Confirm Password",
+        validators=[
+            DataRequired(),
+            EqualTo("password", message="Passwords must match"),
+        ],
+    )
+
+
 class TwoFactorSetupForm(QuartForm):
     token = StringField("Code", validators=[DataRequired()])
 

@@ -51,6 +51,7 @@ class User(UserMixin):
     webauthn: list[WebAuthnCredential] = field(default_factory=list)
     failed_login_count: int | None = None
     locked_until: datetime.datetime | None = None
+    confirmed_at: datetime.datetime | None = None
 
     @property
     def has_usable_password(self):

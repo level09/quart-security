@@ -9,7 +9,14 @@ from uuid import uuid4
 from quart import abort, current_app, g, request, session
 
 from .datastore import SQLAlchemyUserDatastore
-from .forms import ChangePasswordForm, LoginForm, RegisterForm
+from .email import send_email
+from .forms import (
+    ChangePasswordForm,
+    EmailForm,
+    LoginForm,
+    RegisterForm,
+    ResetPasswordForm,
+)
 from .password import init_password_context
 from .proxies import AnonymousUser, current_user
 from .signals import user_authenticated, user_logged_out
@@ -56,6 +63,15 @@ class Security:
         self.change_password_form_cls = kwargs.get(
             "change_password_form", ChangePasswordForm
         )
+        self.forgot_password_form_cls = kwargs.get("forgot_password_form", EmailForm)
+        self.reset_password_form_cls = kwargs.get(
+            "reset_password_form", ResetPasswordForm
+        )
+        self.send_confirmation_form_cls = kwargs.get(
+            "send_confirmation_form", EmailForm
+        )
+        # async (subject, recipient, body); runs as a background task.
+        self.send_mail = kwargs.get("send_mail", send_email)
         self.mail_util_cls = kwargs.get("mail_util_cls")
         self.state_store = kwargs.get("state_store")
 
@@ -74,6 +90,10 @@ class Security:
         self.change_password_form_cls = kwargs.get(
             "change_password_form", self.change_password_form_cls
         )
+        for name in ("forgot_password", "reset_password", "send_confirmation"):
+            attr = f"{name}_form_cls"
+            setattr(self, attr, kwargs.get(f"{name}_form", getattr(self, attr)))
+        self.send_mail = kwargs.get("send_mail", self.send_mail)
         self.mail_util_cls = kwargs.get("mail_util_cls", self.mail_util_cls)
         self.state_store = kwargs.get("state_store", self.state_store)
         if self.state_store is None:
@@ -103,6 +123,8 @@ class Security:
                 required_fields.append("mf_recovery_codes")
             if app.config["SECURITY_WEBAUTHN"]:
                 required_fields.append("fs_webauthn_user_handle")
+            if app.config["SECURITY_CONFIRMABLE"]:
+                required_fields.append("confirmed_at")
             missing = [
                 name
                 for name in required_fields
@@ -114,6 +136,16 @@ class Security:
                 )
         if not app.secret_key:
             raise RuntimeError("Security requires SECRET_KEY")
+        sends_links = app.config["SECURITY_RECOVERABLE"] or (
+            app.config["SECURITY_CONFIRMABLE"] and app.config["SECURITY_REGISTERABLE"]
+        )
+        if sends_links and not app.config["SECURITY_PUBLIC_URL"]:
+            # Links in email must not come from the request's Host header, which
+            # the sender of a reset request controls.
+            raise RuntimeError(
+                "SECURITY_PUBLIC_URL is required for password reset and email"
+                " confirmation links"
+            )
         app.config["SESSION_COOKIE_SECURE"] = app.config["SECURITY_COOKIE_SECURE"]
         app.config["SESSION_COOKIE_HTTPONLY"] = True
         app.config["SESSION_COOKIE_SAMESITE"] = (
@@ -187,6 +219,11 @@ class Security:
             "SECURITY_PASSWORD_LENGTH_MIN": 12,
             "SECURITY_REGISTERABLE": True,
             "SECURITY_CHANGEABLE": True,
+            "SECURITY_RECOVERABLE": False,
+            "SECURITY_CONFIRMABLE": False,
+            "SECURITY_RESET_PASSWORD_WITHIN": timedelta(hours=1),
+            "SECURITY_CONFIRM_EMAIL_WITHIN": timedelta(days=1),
+            "SECURITY_PUBLIC_URL": None,
             "SECURITY_TRACKABLE": True,
             "SECURITY_TWO_FACTOR": True,
             "SECURITY_WEBAUTHN": True,

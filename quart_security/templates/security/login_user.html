@@ -11,4 +11,10 @@
 {% if security.webauthn and security.wan_allow_as_first_factor %}
 <p><a href="{{ url_for_security('wan_signin') }}">Sign in with passkey</a></p>
 {% endif %}
+{% if security.recoverable %}
+<p><a href="{{ url_for_security('forgot_password') }}">Forgot password?</a></p>
+{% endif %}
 <p><a href="{{ url_for_security('register') }}">Create account</a></p>
+{% if security.registerable and security.confirmable %}
+<p><a href="{{ url_for_security('send_confirmation') }}">Resend confirmation link</a></p>
+{% endif %}

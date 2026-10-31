@@ -1,0 +1,8 @@
+<!doctype html>
+<title>Confirm email</title>
+<h1>Confirm your email</h1>
+<p>Confirm only if you created this account. If you did not, close this page.</p>
+<form method="post" action="{{ url_for_security('confirm_email', token=confirm_email_token) }}">
+  {{ confirm_email_form.hidden_tag() }}
+  <button type="submit">Confirm my email</button>
+</form>

@@ -279,6 +279,12 @@ class SQLAlchemyUserDatastore:
     async def commit(self):
         await self.session.commit()
 
+    async def rollback(self):
+        await self.session.rollback()
+
+    async def refresh(self, obj):
+        await self.session.refresh(obj)
+
     def begin_request(self):
         self._active_session.set(None)
 

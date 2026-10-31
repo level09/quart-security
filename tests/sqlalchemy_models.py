@@ -11,7 +11,7 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
     fs_uniquifier: Mapped[str] = mapped_column(String, primary_key=True)
-    email: Mapped[str] = mapped_column(String)
+    email: Mapped[str] = mapped_column(String, unique=True)
     mf_recovery_codes: Mapped[list] = mapped_column(JSON, default=list)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime.datetime | None] = mapped_column(DateTime)

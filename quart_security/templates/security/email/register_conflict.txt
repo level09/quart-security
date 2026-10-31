@@ -1,0 +1,6 @@
+Someone tried to create an account with this email address. You already have one, so nothing changed.
+
+Sign in: {{ login_link }}
+{% if reset_link %}Forgot your password? Reset it: {{ reset_link }}
+{% endif %}
+If it was not you, you can ignore this email.

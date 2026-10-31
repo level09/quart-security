@@ -1,0 +1,5 @@
+Confirm this email address to finish creating your account:
+
+{{ confirmation_link }}
+
+If you did not sign up, ignore this email and the account stays unusable.
