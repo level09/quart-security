@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.1.1] - 2026-10-31
+
+### Security
+
+- WebAuthn failure warnings log the verifier's message with `repr`. The
+  message can carry client-supplied text, such as the origin from a forged
+  credential, and a raw newline in it could forge a log line.
+
 ## [2.1.0] - 2026-10-31
 
 ### Added
