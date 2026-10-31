@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.6] - 2026-10-31
+
+### Security
+
+- Registration no longer reveals which emails have an account. An existing
+  email gets the same redirect and message as a new one, after the same
+  password checks and hashing, and nothing is created. The new
+  `user_register_conflict` signal fires with the existing user so the app can
+  tell the owner out of band.
+
+### Fixed
+
+- `/login?next=/path` returns the user to `/path` after password, 2FA,
+  recovery code or passkey sign-in. Before, `auth_required` sent `next` but
+  login always went to `SECURITY_POST_LOGIN_VIEW`. Only same-site paths are
+  honored, each visit to the login form replaces the target, and a target
+  older than 10 minutes is ignored.
+
 ## [2.0.5] - 2026-10-31
 
 ### Security
