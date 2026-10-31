@@ -16,7 +16,7 @@ uv run ruff check --fix . && uv run ruff format .  # Lint + format
 
 Trusted Publisher is configured on PyPI. Do NOT use `flit publish` or API tokens.
 
-Bumping `version` in `pyproject.toml` is the release. Commit the bump with a `## [<version>]` CHANGELOG entry and push to main. `.github/workflows/publish.yml` then runs CI and stk's checks against the commit, publishes, and creates the tag and GitHub release from that entry. Never tag or create releases by hand; batch fixes on main and bump only when ready.
+Bumping `version` in `pyproject.toml` is the release. Commit the bump with a `## [<version>]` CHANGELOG entry and push to main. `.github/workflows/publish.yml` then runs CI against the commit, publishes, and creates the tag and GitHub release from that entry. Never tag or create releases by hand; batch fixes on main and bump only when ready.
 
 ## Architecture
 
