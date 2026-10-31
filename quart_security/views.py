@@ -1283,7 +1283,7 @@ async def wan_register_response():
         )
     except Exception as exc:
         current_app.logger.warning(
-            "WebAuthn registration failed: %s: %s", type(exc).__name__, exc
+            "WebAuthn registration failed: %s: %r", type(exc).__name__, str(exc)
         )
         await flash("Passkey registration failed.", "error")
         return redirect(url_for_security("wan_register"))
@@ -1408,7 +1408,7 @@ async def wan_signin_response():
         )
     except Exception as exc:
         current_app.logger.warning(
-            "WebAuthn sign-in failed: %s: %s", type(exc).__name__, exc
+            "WebAuthn sign-in failed: %s: %r", type(exc).__name__, str(exc)
         )
         await flash("Passkey verification failed.", "error")
         return redirect(url_for_security("wan_signin"))
@@ -1518,7 +1518,7 @@ async def wan_verify_response():
         )
     except Exception as exc:
         current_app.logger.warning(
-            "WebAuthn verification failed: %s: %s", type(exc).__name__, exc
+            "WebAuthn verification failed: %s: %r", type(exc).__name__, str(exc)
         )
         await flash("Passkey verification failed.", "error")
         return redirect(url_for_security("wan_verify"))
