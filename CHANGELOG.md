@@ -4,6 +4,93 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.4] - 2026-10-31
+
+### Fixed
+
+- Login and registration trim spaces around the email, and
+  `SQLAlchemyUserDatastore.find_user(email=...)` matches case-insensitively.
+  A user stored as `Admin@Example.com` by host code (an admin page, a CLI) can
+  sign in again; registration already stored emails lowercased. When two
+  stored emails differ only by case, `find_user` raises `ValueError` rather
+  than pick one: give the email column a unique constraint on its lowercased
+  value.
+
+### Removed
+
+- The `remember` field on `LoginForm`, which nothing read. A custom login
+  template that renders `form.remember` must drop it.
+- The unused `SECURITY_FRESHNESS_GRACE_PERIOD` default.
+
+## [2.0.3] - 2026-10-25
+
+### Fixed
+
+- Declare the passkey usage choices with `SelectChoice`, as WTForms 3.3
+  expects. The `wtforms` floor is now 3.3.
+
+## [2.0.2] - 2026-10-25
+
+### Changed
+
+- The breach check uses `httpx2` instead of `httpx`.
+
+## [2.0.1] - 2026-10-06
+
+### Security
+
+- Encrypt stored TOTP secrets at rest with Fernet. Keys derive from
+  `SECRET_KEY` via HMAC, or come from `SECURITY_TOTP_ENCRYPTION_KEYS` (a
+  `MultiFernet` key list) to support rotation. Legacy plaintext seeds stay
+  readable and are re-encrypted on load and on login. Pending setup secrets in
+  the state store are encrypted as well.
+
+### Fixed
+
+- Generate authenticator QR codes off the event loop.
+
+## [2.0.0] - 2026-10-06
+
+### Security
+
+- Server-side state store (`quart_security_state` table) backs sessions and
+  one-time verification state. Cookies carry opaque tokens only; every
+  authenticated request validates its token server-side. **Migration
+  required**; existing login cookies are invalidated. See README.
+- Revoke sessions on password change, MFA profile change, passkey
+  registration/deletion, and recovery-code regeneration via atomic
+  `fs_uniquifier` rotation. Conflict aborts with 409.
+- Accepted TOTP time steps cannot be reused (atomic consumed-step store, per
+  PyOTP guidance). WebAuthn challenges and recovery codes are consumed
+  atomically.
+- Pending TOTP setup secrets are stored server-side with a five-minute expiry
+  instead of in the session cookie.
+- First-factor passkey sign-in rejects credentials registered with
+  `usage="secondary"`.
+- `/mf-recovery` enforces `SECURITY_MULTI_FACTOR_RECOVERY_CODES` (404 when
+  disabled).
+- Passkey step-up refreshes the authentication timestamp, so fresh-required
+  endpoints accept the session afterwards.
+- Password change verifies the exact submitted current password.
+- Force `SESSION_COOKIE_HTTPONLY=True` and `SameSite=Lax`;
+  `SECURITY_COOKIE_SECURE` (default `True`) controls `SESSION_COOKIE_SECURE`.
+- Fail fast at startup on missing `SECRET_KEY`, missing atomic datastore
+  hooks, missing required user-model fields, or a missing state table.
+- Inactive users are rejected at MFA completion, not only on the next request.
+
+### Fixed
+
+- Datastore keeps one session per request across commits and closes
+  factory-owned sessions at request teardown. `expire_on_commit=False` is
+  required and enforced.
+- Real QR generation works in a clean install via the declared `qrcode[pil]`.
+
+### Changed
+
+- Custom datastores must provide a shared `state_store` and the atomic hooks
+  `rotate_uniquifier`, `record_auth_failure` (lockout), and
+  `replace_recovery_codes` (recovery codes) when those features are enabled.
+
 ## [1.4.1] - 2026-07-12
 
 ### Security
