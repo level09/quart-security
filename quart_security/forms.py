@@ -4,9 +4,13 @@ import secrets
 
 from markupsafe import Markup, escape
 from quart import request
-from wtforms import BooleanField, PasswordField, RadioField, SelectChoice, StringField
+from wtforms import PasswordField, RadioField, SelectChoice, StringField
 from wtforms.form import Form
 from wtforms.validators import DataRequired, Email, EqualTo, Optional
+
+
+def _strip_email(value):
+    return value.strip() if value is not None else value
 
 
 class QuartForm(Form):
@@ -52,14 +56,17 @@ class QuartForm(Form):
 
 
 class LoginForm(QuartForm):
-    email = StringField("Email", validators=[DataRequired(), Email()])
+    email = StringField(
+        "Email", filters=[_strip_email], validators=[DataRequired(), Email()]
+    )
     password = PasswordField("Password", validators=[DataRequired()])
-    remember = BooleanField("Remember me")
 
 
 class RegisterForm(QuartForm):
     name = StringField("Full Name", validators=[Optional()])
-    email = StringField("Email", validators=[DataRequired(), Email()])
+    email = StringField(
+        "Email", filters=[_strip_email], validators=[DataRequired(), Email()]
+    )
     password = PasswordField("Password", validators=[DataRequired()])
     password_confirm = PasswordField(
         "Confirm Password",

@@ -200,7 +200,6 @@ class Security:
             "SECURITY_WAN_EXPECTED_ORIGIN": None,
             "SECURITY_WAN_REQUIRE_USER_VERIFICATION": True,
             "SECURITY_FRESHNESS": timedelta(minutes=60),
-            "SECURITY_FRESHNESS_GRACE_PERIOD": timedelta(minutes=60),
             "SECURITY_LOGIN_MAX_ATTEMPTS": 5,
             "SECURITY_LOCKOUT_MINUTES": 15,
             "SECURITY_POST_LOGIN_VIEW": "/",

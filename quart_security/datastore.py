@@ -58,6 +58,21 @@ class SQLAlchemyUserDatastore:
         return stmt
 
     async def find_user(self, **kwargs):
+        if "email" in kwargs:
+            email = kwargs.pop("email")
+            # ponytail: lower(email) skips a plain email index, so each login scans
+            # the user table; add a functional index if logins slow with user count.
+            stmt = (
+                self._select(self.user_model)
+                .filter_by(**kwargs)
+                .where(func.lower(self.user_model.email) == email.lower())
+                .limit(2)
+            )
+            result = await self.session.execute(stmt)
+            users = result.scalars().all()
+            if len(users) > 1:
+                raise ValueError("Multiple users share the same case-insensitive email")
+            return users[0] if users else None
         return await self._first(self.user_model, **kwargs)
 
     async def find_role(self, name):

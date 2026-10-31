@@ -32,6 +32,25 @@ async def test_request_cleanup_releases_read_transaction(database):
     await datastore.close()
 
 
+async def test_find_user_email_ignores_case_for_existing_records(database):
+    datastore = SQLAlchemyUserDatastore(database, User, User)
+    await datastore.create_user(email="Mixed@Example.COM")
+    await datastore.commit()
+    user = await datastore.find_user(email="mixed@example.com")
+    assert user.email == "Mixed@Example.COM"
+    await datastore.close()
+
+
+async def test_find_user_rejects_case_collisions(database):
+    datastore = SQLAlchemyUserDatastore(database, User, User)
+    await datastore.create_user(email="One@example.com")
+    await datastore.create_user(email="one@example.com")
+    await datastore.commit()
+    with pytest.raises(ValueError, match="case-insensitive email"):
+        await datastore.find_user(email="one@example.com")
+    await datastore.close()
+
+
 async def test_concurrent_recovery_consumption(database):
     owner = SQLAlchemyUserDatastore(database, User, User)
     user = await owner.create_user(

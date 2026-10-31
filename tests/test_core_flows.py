@@ -12,7 +12,7 @@ async def test_register_creates_user(client, app):
         "/register",
         form={
             "name": "New User",
-            "email": "new@example.com",
+            "email": "  New@Example.COM  ",
             "password": "new-password-123",
             "password_confirm": "new-password-123",
         },
@@ -25,6 +25,16 @@ async def test_register_creates_user(client, app):
     assert user is not None
     assert user.password != "new-password-123"
     assert verify_password("new-password-123", user.password, app=app)
+
+
+@pytest.mark.asyncio
+async def test_login_accepts_email_case_and_surrounding_spaces(client):
+    response = await client.post(
+        "/login",
+        form={"email": "  UsEr@ExAmPlE.CoM  ", "password": "correct-password"},
+    )
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/protected")
 
 
 @pytest.mark.asyncio
