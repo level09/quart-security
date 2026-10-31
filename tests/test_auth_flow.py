@@ -98,3 +98,29 @@ async def test_login_lockout_resets_after_expiry(client, app):
     assert response.headers["Location"].endswith("/protected")
     assert user.failed_login_count == 0
     assert user.locked_until is None
+
+
+@pytest.mark.asyncio
+async def test_login_verifies_a_hash_even_without_an_active_account(
+    client, app, monkeypatch
+):
+    """Skipping the hash for unknown or inactive emails would let response time
+    reveal which addresses have an account."""
+    from quart_security import views
+
+    checked = []
+    real = views.verify_password_async
+
+    async def counting(password, password_hash, **kwargs):
+        checked.append(password_hash)
+        return await real(password, password_hash, **kwargs)
+
+    monkeypatch.setattr(views, "verify_password_async", counting)
+    app.extensions["test_admin_user"].active = False
+    for email in ("nobody@example.com", "admin@example.com"):
+        response = await client.post(
+            "/login", form={"email": email, "password": "correct-password"}
+        )
+        assert response.status_code == 200
+    assert len(checked) == 2
+    assert checked[0] == checked[1]  # the same stand-in hash, not the user's

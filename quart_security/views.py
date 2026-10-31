@@ -37,6 +37,7 @@ from .forms import (
 from .password import (
     hash_password_async,
     password_needs_rehash,
+    unknown_user_hash_async,
     validate_password,
     verify_password_async,
 )
@@ -364,11 +365,14 @@ async def login():
             user.locked_until = None
             await _commit()
 
-        if (
-            user
-            and getattr(user, "active", True)
-            and await verify_password_async(form.password.data, user.password)
-        ):
+        # Always run one verify, so response time does not reveal which emails
+        # have an active account.
+        known = user is not None and getattr(user, "active", True)
+        password_ok = await verify_password_async(
+            form.password.data,
+            user.password if known else await unknown_user_hash_async(),
+        )
+        if known and password_ok:
             # Transparent rehash: upgrade weak/legacy hash on successful login
             if password_needs_rehash(user.password):
                 user.password = await hash_password_async(form.password.data)
@@ -929,7 +933,11 @@ async def wan_register_response():
         await flash("Passkey registration failed.", "error")
         return redirect(url_for_security("wan_register"))
 
+    # Look across all users too: a software authenticator can pick any credential
+    # ID, and sign-in resolves the owner by ID alone.
     existing = await _find_webauthn_credential(
+        verification["credential_id"], user=None
+    ) or await _find_webauthn_credential(
         verification["credential_id"], user=current_user
     )
     if existing:

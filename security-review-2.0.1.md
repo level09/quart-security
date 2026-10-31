@@ -104,12 +104,12 @@ reset tokens also means no reset-token attack surface.
    template config map only). Hosts needing them must build their own.
 2. ~~Dead surface~~ **Fixed 2026-10-25**: removed the unread `remember`
    LoginForm field and the unused `SECURITY_FRESHNESS_GRACE_PERIOD` default.
-3. **Timing oracle**: unknown emails skip argon2 verification on login
+3. ~~Timing oracle~~ **Fixed 2026-10-31 (2.0.5)** for unknown and inactive emails: unknown emails skip argon2 verification on login
    (measurable response-time difference; Flask-Security behaves the same).
    The lockout message also reveals existence of *locked* accounts.
 4. **Registration enumeration**: "email already exists" message — same
    tradeoff as Flask-Security's default.
-5. **WebAuthn credential-ID collision**: duplicate check at registration is
+5. ~~WebAuthn credential-ID collision~~ **Fixed 2026-10-31 (2.0.5)**: registration now checks the ID across all users. duplicate check at registration is
    scoped to the current user; global uniqueness relies on the DB unique
    constraint the README mandates. Consider a global `find_webauthn_credential`
    check for defense in depth (exploitable only with a software authenticator

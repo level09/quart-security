@@ -14,10 +14,22 @@ def _registration_options(challenge: bytes, user_id: bytes = b"user-handle"):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("taken_by_other_user", [False, True])
 async def test_wan_register_creates_credential(
-    client_webauthn, app_webauthn, monkeypatch
+    client_webauthn, app_webauthn, monkeypatch, taken_by_other_user
 ):
     user = app_webauthn.extensions["test_basic_user"]
+    if taken_by_other_user:
+        # Sign-in finds a credential's owner by its ID alone, so an ID already
+        # held by another account must not be registered again.
+        app_webauthn.extensions["test_datastore"].create_webauthn_credential(
+            app_webauthn.extensions["test_admin_user"],
+            credential_id=b"cred-1",
+            public_key=b"other-key",
+            sign_count=0,
+            name="Admin passkey",
+            usage="primary",
+        )
 
     async def fake_begin_registration(
         user, rp_id, rp_name, challenge, existing_credentials=None, discoverable=False
@@ -74,6 +86,9 @@ async def test_wan_register_creates_credential(
 
     assert register_finish.status_code == 302
     assert register_finish.headers["Location"].endswith("/wan-register")
+    if taken_by_other_user:
+        assert user.webauthn == []
+        return
     assert len(user.webauthn) == 1
     assert user.webauthn[0].name == "MacBook Passkey"
     assert user.webauthn[0].usage == "primary"

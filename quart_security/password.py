@@ -1,6 +1,7 @@
 """Password hashing and validation helpers."""
 
 import asyncio
+import secrets
 
 from passlib.context import CryptContext
 from quart import current_app
@@ -80,6 +81,17 @@ async def hash_password_async(password: str, *, app=None) -> str:
 
 async def verify_password_async(password: str, password_hash: str, *, app=None) -> bool:
     return await asyncio.to_thread(verify_password, password, password_hash, app=app)
+
+
+async def unknown_user_hash_async(*, app=None) -> str:
+    """A hash to verify against when no account matches, so a login for an
+    unknown or inactive email costs the same as a wrong password."""
+    app = app or current_app._get_current_object()
+    cached = app.extensions.get("quart_security_unknown_hash")
+    if cached is None:
+        cached = await hash_password_async(secrets.token_urlsafe(32), app=app)
+        app.extensions["quart_security_unknown_hash"] = cached
+    return cached
 
 
 def validate_password(password: str, min_length: int = 12) -> list[str]:
