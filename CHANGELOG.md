@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.2.0] - 2026-11-01
+
+Emails are now normalized more fully. An account stored with a decomposed
+Unicode or punycode email no longer matches its sign-in form; rewrite those rows
+with `normalize_email` (no row needs it if every user signed up through
+quart-security 2.1 or earlier with an ASCII address).
+
+### Added
+
+- `normalize_email`: lowercased, Unicode NFC, internationalized domains
+  decoded. Login, registration, reset and confirmation all use it.
+
+### Security
+
+- Registration no longer creates separate accounts for one mailbox written two
+  ways, such as `josé@` composed and decomposed, or `münchen.de` and
+  `xn--mnchen-3ya.de`.
+- Passkey sign-in now refuses a locked or unconfirmed account, like password
+  login. With 2FA on, it asks for the second factor unless the passkey verified
+  the user and `SECURITY_WAN_ALLOW_AS_MULTI_FACTOR` allows it.
+
+### Fixed
+
+- `auth_required` sent `next` as an absolute URL, which login rejects, so users
+  always landed on `SECURITY_POST_LOGIN_VIEW` instead of the page they asked for.
+  It now sends the encoded path and query.
+- Passwords are NFKD-normalized, so a password typed in decomposed Unicode
+  matches the one set in composed form. Hashes made before still verify. The
+  length and breach checks look at the normalized password too, so a
+  fullwidth `ｐａｓｓｗｏｒｄ１２３` is caught as `password123`.
+- A legacy bcrypt hash and a password over 72 bytes made login fail with a 500
+  under bcrypt 5. Only the first 72 bytes are checked, as bcrypt always did.
+
 ## [2.1.1] - 2026-10-31
 
 ### Security

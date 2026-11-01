@@ -20,7 +20,7 @@ from .signals import (
     user_registered,
 )
 from .state import SecurityState, SQLAlchemyStateStore
-from .utils import url_for_security
+from .utils import normalize_email, url_for_security
 
 __all__ = [
     "Security",
@@ -43,4 +43,5 @@ __all__ = [
     "user_registered",
     "user_register_conflict",
     "url_for_security",
+    "normalize_email",
 ]

@@ -3,6 +3,7 @@
 import datetime
 import time
 from functools import wraps
+from urllib.parse import quote
 
 from quart import abort, current_app, redirect, request, session
 
@@ -23,7 +24,12 @@ def auth_required(*methods, fresh=False):
             if not current_user.is_authenticated:
                 if request.is_json:
                     abort(401)
-                return redirect(url_for_security("login", next=request.url))
+                # A path, not request.url: login only follows same-site paths.
+                # request.path is decoded; quote it so "%23" stays in the path.
+                target = quote(request.script_root + request.path)
+                if request.query_string:
+                    target += "?" + request.query_string.decode()
+                return redirect(url_for_security("login", next=target))
             if fresh:
                 freshness = current_app.config.get(
                     "SECURITY_FRESHNESS", datetime.timedelta(minutes=60)

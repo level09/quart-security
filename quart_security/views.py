@@ -50,17 +50,13 @@ from .signals import (
     user_register_conflict,
     user_registered,
 )
-from .utils import maybe_await, naive_utcnow, url_for_security
+from .utils import maybe_await, naive_utcnow, normalize_email, url_for_security
 
 security_bp = Blueprint("security", __name__, template_folder="templates")
 
 
 def _is_post() -> bool:
     return request.method == "POST"
-
-
-def _normalize_email(value: str | None) -> str:
-    return (value or "").strip().lower()
 
 
 def _resolve_redirect(config_key: str, fallback_endpoint: str) -> str:
@@ -273,6 +269,20 @@ async def _password_errors(password: str) -> list[str]:
         if await password_is_breached(password, count_min=count_min):
             errors = ["This password has appeared in a data breach. Choose another."]
     return errors
+
+
+def _needs_second_factor(user) -> bool:
+    return bool(
+        current_app.config.get("SECURITY_TWO_FACTOR")
+        and getattr(user, "tf_primary_method", None)
+    )
+
+
+async def _start_second_factor(user):
+    session["tf_user_id"] = await _security.state_store.put(
+        {"user_id": user.get_id()}, ttl=300
+    )
+    return redirect(url_for_security("two_factor_token_validation"))
 
 
 def _awaiting_confirmation(user) -> bool:
@@ -494,7 +504,7 @@ async def login():
             session.pop("security_next", None)
 
     if _is_post() and form.validate():
-        user = await _find_user(email=_normalize_email(form.email.data))
+        user = await _find_user(email=normalize_email(form.email.data))
 
         # A locked account fails like a wrong password, after the same work: a
         # distinct "locked" answer would only ever appear for real accounts.
@@ -525,13 +535,8 @@ async def login():
                 user.password = await hash_password_async(form.password.data)
                 await _commit()
 
-            if current_app.config.get("SECURITY_TWO_FACTOR") and getattr(
-                user, "tf_primary_method", None
-            ):
-                session["tf_user_id"] = await _security.state_store.put(
-                    {"user_id": user.get_id()}, ttl=300
-                )
-                return redirect(url_for_security("two_factor_token_validation"))
+            if _needs_second_factor(user):
+                return await _start_second_factor(user)
 
             await _reset_auth_failures(user)
             return await _complete_login(user)
@@ -562,7 +567,7 @@ async def register():
     await _enforce_csrf(getattr(form, "_submitted_csrf", None))
 
     if _is_post() and form.validate():
-        email = _normalize_email(form.email.data)
+        email = normalize_email(form.email.data)
         # Password checks come first and an existing email gets the same answer as
         # a new one, after the same hashing work, so the form never reveals which
         # emails have an account.
@@ -655,7 +660,7 @@ async def forgot_password():
 
     if _is_post() and form.validate():
         raw, link = _new_link("reset_password")
-        _defer(_reset_job, _normalize_email(form.email.data), raw, link)
+        _defer(_reset_job, normalize_email(form.email.data), raw, link)
         await flash(
             "If an account uses that email, a link to reset its password is on"
             " its way.",
@@ -775,7 +780,7 @@ async def send_confirmation():
 
     if _is_post() and form.validate():
         raw, link = _new_link("confirm_email")
-        _defer(_send_confirmation_job, _normalize_email(form.email.data), raw, link)
+        _defer(_send_confirmation_job, normalize_email(form.email.data), raw, link)
         await flash(
             "If that email is waiting to be confirmed, a new link is on its way.",
             "info",
@@ -1384,7 +1389,12 @@ async def wan_signin_response():
         await flash("Unable to identify user from passkey.", "error")
         return redirect(url_for_security("wan_signin"))
 
-    if not getattr(user, "active", True):
+    # Same gates as a password login; one message, as there.
+    if (
+        not getattr(user, "active", True)
+        or _account_is_locked(user)
+        or _awaiting_confirmation(user)
+    ):
         await flash("Unable to find user for passkey sign-in.", "error")
         return redirect(url_for_security("wan_signin"))
     if user_handle and user_handle != user.fs_webauthn_user_handle:
@@ -1416,6 +1426,16 @@ async def wan_signin_response():
     stored_credential.sign_count = int(new_sign_count)
     if hasattr(stored_credential, "lastuse_datetime"):
         stored_credential.lastuse_datetime = naive_utcnow()
+
+    # A passkey replaces the second factor only when it proved the user too
+    # (user verification) and the app allows that.
+    config = current_app.config
+    if _needs_second_factor(user) and not (
+        config.get("SECURITY_WAN_REQUIRE_USER_VERIFICATION", True)
+        and config.get("SECURITY_WAN_ALLOW_AS_MULTI_FACTOR", True)
+    ):
+        await _commit()
+        return await _start_second_factor(user)
 
     return await _complete_login(user)
 

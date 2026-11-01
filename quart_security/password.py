@@ -2,8 +2,10 @@
 
 import asyncio
 import secrets
+import unicodedata
 
 from passlib.context import CryptContext
+from passlib.exc import PasswordSizeError
 from quart import current_app
 
 # OWASP 2025 minimum argon2id parameters
@@ -50,19 +52,42 @@ def _password_config(app=None):
     return (app or current_app).extensions["quart_security_password"]
 
 
+def normalize_password(password: str) -> str:
+    # The same password typed through different keyboards or pasted can arrive
+    # composed or decomposed; NFKD makes them one secret.
+    return unicodedata.normalize("NFKD", password)
+
+
+def _secret(password: str, scheme: str | None) -> str | bytes:
+    # bcrypt only ever used the first 72 bytes; bcrypt 5 raises on more.
+    return password.encode()[:72] if scheme == "bcrypt" else password
+
+
 def hash_password(password: str, *, app=None) -> str:
     context, _salt = _password_config(app)
-    return context.hash(password)
+    return context.hash(_secret(normalize_password(password), context.default_scheme()))
 
 
 def verify_password(password: str, password_hash: str, *, app=None) -> bool:
     context, salt = _password_config(app)
-    if context.verify(password, password_hash):
-        return True
-    # Optional fallback for deployments that previously mixed in app salt.
+    scheme = context.identify(password_hash)
+    candidates = [normalize_password(password)]
+    if candidates[0] != password:
+        candidates.append(password)  # hashed before passwords were normalized
     if salt:
-        return context.verify(f"{password}{salt}", password_hash)
-    return False
+        # Optional fallback for deployments that previously mixed in app salt.
+        candidates += [f"{c}{salt}" for c in candidates]
+    return any(
+        _verifies(context, _secret(c, scheme), password_hash) for c in candidates
+    )
+
+
+def _verifies(context, secret, password_hash) -> bool:
+    try:
+        return context.verify(secret, password_hash)
+    except PasswordSizeError:
+        # NFKD can push a password that was hashed raw past passlib's limit.
+        return False
 
 
 def password_needs_rehash(password_hash: str, *, app=None) -> bool:
@@ -96,6 +121,6 @@ async def unknown_user_hash_async(*, app=None) -> str:
 
 def validate_password(password: str, min_length: int = 12) -> list[str]:
     errors: list[str] = []
-    if len(password) < min_length:
+    if len(normalize_password(password)) < min_length:
         errors.append(f"Password must be at least {min_length} characters")
     return errors

@@ -7,6 +7,8 @@ import logging
 
 import httpx2
 
+from .password import normalize_password
+
 logger = logging.getLogger(__name__)
 
 _HIBP_URL = "https://api.pwnedpasswords.com/range/{prefix}"
@@ -24,6 +26,8 @@ async def password_is_breached(password: str, *, count_min: int = 1) -> bool | N
         False - password not found in response.
         None  - network/HTTP error; caller should fail-open (allow the password).
     """
+    # Check the secret that gets hashed, not the typed form of it.
+    password = normalize_password(password)
     sha1 = (
         hashlib.sha1(password.encode("utf-8"), usedforsecurity=False)
         .hexdigest()

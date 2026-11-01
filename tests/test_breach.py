@@ -89,3 +89,12 @@ async def test_http_error_fails_open():
     ):
         result = await password_is_breached(BREACHED_PW)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fullwidth_password_is_checked_as_what_gets_hashed():
+    """Fullwidth input hashes as ASCII, so it is checked as ASCII."""
+    body = f"{_SUFFIX_BREACHED}:42\n"
+    with _hibp(_PREFIX_BREACHED, lambda request: httpx2.Response(200, text=body)):
+        result = await password_is_breached("ｐａｓｓｗｏｒｄ１２３", count_min=1)
+    assert result is True

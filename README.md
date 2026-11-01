@@ -113,6 +113,11 @@ These fields are required when login or MFA lockout is enabled. The built-in
 counter limits account-level guesses. Deploy an application or edge rate limiter
 for source IP and distributed abuse controls.
 
+Emails are normalized with `normalize_email` (Unicode NFC, internationalized
+domains decoded, lowercased) before every lookup and on registration; store
+them the same way. Passwords are NFKD-normalized before hashing, so the same
+password typed in composed or decomposed Unicode is one secret.
+
 The database must enforce unique normalized emails, `fs_uniquifier` values,
 WebAuthn user handles, and credential IDs. Use a stable primary key separate from
 `fs_uniquifier`: this value changes when security settings change.
@@ -144,7 +149,7 @@ Password reset and email confirmation:
 - `SECURITY_RESET_PASSWORD_WITHIN` (default: 1 hour)
 - `SECURITY_CONFIRM_EMAIL_WITHIN` (default: 1 day)
 
-Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. They are transparently rehashed to argon2id on the user's next successful login.
+Existing pbkdf2_sha512 and bcrypt hashes continue to verify after the argon2 default change. bcrypt hashes are checked against the first 72 bytes of the password, as bcrypt always did. They are transparently rehashed to argon2id on the user's next successful login.
 
 Until then, a failed login for an account with a legacy hash takes a different time than one for an unknown email, which is checked against an argon2id dummy, so timing can reveal that the account exists. Apps that import hashes from another system should require a password reset rather than leave them in place.
 
@@ -175,7 +180,7 @@ Routing:
 - `SECURITY_POST_LOGIN_VIEW`
 - `SECURITY_POST_REGISTER_VIEW`
 
-A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it.
+A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. `auth_required` sends the page that was asked for. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it.
 
 Registration answers the same way whether or not the email already has an account. For an existing email nothing is created and `user_register_conflict` fires with the existing user. On its own that is not enough: someone can register an email and try to sign in with the password they chose, which works only if the account is new. Turn on `SECURITY_CONFIRMABLE` to close that gap.
 
