@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.2.1] - 2026-11-14
+
+### Fixed
+
+- `auth_required` answers 401 instead of redirecting to login when the request
+  is not a page visit (`Sec-Fetch-Mode` other than `navigate`, or an `Accept`
+  header without HTML). An EventSource or XHR that outlived its session
+  followed the redirect, and the login form kept its URL as `next`, so the next
+  person to sign in landed on that endpoint instead of their page.
+
 ## [2.2.0] - 2026-11-01
 
 Emails are now normalized more fully. An account stored with a decomposed

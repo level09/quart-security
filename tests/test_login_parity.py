@@ -38,6 +38,23 @@ async def test_auth_required_next_keeps_encoded_characters(app, client):
     assert response.headers["Location"] == "/files/report%23q1?a=b%3F"
 
 
+async def test_auth_required_background_request_never_sets_next(app, client):
+    @app.get("/live")
+    @auth_required("session")
+    async def live():
+        return "live"
+
+    for headers in (
+        {"Sec-Fetch-Mode": "cors", "Accept": "*/*"},
+        {"Accept": "text/event-stream"},
+    ):
+        assert (await client.get("/live", headers=headers)).status_code == 401
+    page = await client.get(
+        "/live", headers={"Sec-Fetch-Mode": "navigate", "Accept": "text/html"}
+    )
+    assert page.headers["Location"] == "/login?next=/live"
+
+
 async def test_password_that_normalizes_past_the_limit_still_verifies(app):
     password = "\ufdfa" * 228  # NFKD expands each to 18 characters
     context, _salt = app.extensions["quart_security_password"]

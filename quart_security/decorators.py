@@ -11,6 +11,15 @@ from .proxies import current_user
 from .utils import url_for_security
 
 
+def _is_navigation():
+    # Only a page visit may pick where login goes next: an EventSource or XHR
+    # that outlived its session would otherwise hand its URL to the next login.
+    mode = request.headers.get("Sec-Fetch-Mode")
+    if mode and mode != "navigate":
+        return False
+    return "Accept" not in request.headers or request.accept_mimetypes.accept_html
+
+
 def auth_required(*methods, fresh=False):
     """Require an authenticated user for a route."""
 
@@ -22,7 +31,7 @@ def auth_required(*methods, fresh=False):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             if not current_user.is_authenticated:
-                if request.is_json:
+                if request.is_json or not _is_navigation():
                     abort(401)
                 # A path, not request.url: login only follows same-site paths.
                 # request.path is decoded; quote it so "%23" stays in the path.
