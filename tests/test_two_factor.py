@@ -127,7 +127,7 @@ async def test_invalid_second_factor_increments_account_failures(
 ):
     user = app_two_factor.extensions["test_basic_user"]
     user.tf_primary_method = "authenticator"
-    user.tf_totp_secret = "JBSWY3DPEHPK3PXP"
+    user.tf_totp_secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 
     await client_two_factor.post(
         "/login",

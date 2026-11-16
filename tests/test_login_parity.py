@@ -136,7 +136,7 @@ async def test_passkey_sign_in_gates(datastore, monkeypatch, case, signed_in):
     client = app.test_client()
     user = app.extensions["test_basic_user"]
     user.tf_primary_method = "authenticator"
-    user.tf_totp_secret = "JBSWY3DPEHPK3PXP"
+    user.tf_totp_secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
     user.fs_webauthn_user_handle = "h1"
     if case == "locked":
         user.locked_until = naive_utcnow() + datetime.timedelta(minutes=10)
