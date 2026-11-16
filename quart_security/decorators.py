@@ -33,6 +33,10 @@ def auth_required(*methods, fresh=False):
             if not current_user.is_authenticated:
                 if request.is_json or not _is_navigation():
                     abort(401)
+                # Only a GET can be replayed after login: a form POST whose
+                # session expired would otherwise land on its URL as a GET.
+                if request.method != "GET":
+                    return redirect(url_for_security("login"))
                 # A path, not request.url: login only follows same-site paths.
                 # request.path is decoded; quote it so "%23" stays in the path.
                 target = quote(request.script_root + request.path)

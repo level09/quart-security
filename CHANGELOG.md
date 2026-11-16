@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.3.0] - 2026-11-16
+
+### Changed
+
+- `/login` sends a user who is already signed in to the safe `next` target or
+  `SECURITY_POST_LOGIN_VIEW` instead of showing the form, as Devise and
+  Flask-Security do.
+
+### Fixed
+
+- `auth_required` keeps `next` only for GET requests. A form posted after its
+  session expired kept its POST URL as the target, and login then sent the user
+  there as a GET.
+
 ## [2.2.1] - 2026-11-14
 
 ### Fixed

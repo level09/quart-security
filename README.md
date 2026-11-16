@@ -180,7 +180,7 @@ Routing:
 - `SECURITY_POST_LOGIN_VIEW`
 - `SECURITY_POST_REGISTER_VIEW`
 
-A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. `auth_required` sends the page that was asked for. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it.
+A visit to `/login?next=/path` sends the user to `/path` after they sign in, through 2FA and passkey sign-in too. `auth_required` sends the page that was asked for. Only same-site paths are honored, the next visit to `/login` replaces the target, and a sign-in finishing more than 10 minutes after the form was shown ignores it. Only a GET records its page: a form posted after the session expired goes to plain `/login`. A user who is already signed in and visits `/login` is sent straight to the target, or to `SECURITY_POST_LOGIN_VIEW`.
 
 Registration answers the same way whether or not the email already has an account. For an existing email nothing is created and `user_register_conflict` fires with the existing user. On its own that is not enough: someone can register an email and try to sign in with the password they chose, which works only if the account is new. Turn on `SECURITY_CONFIRMABLE` to close that gap.
 

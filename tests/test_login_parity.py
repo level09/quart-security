@@ -159,3 +159,24 @@ async def test_passkey_sign_in_gates(datastore, monkeypatch, case, signed_in):
     credential = {"id": webauthn.bytes_to_base64url(b"cid"), "response": {}}
     await client.post("/wan-signin-response", json={"credential": credential})
     assert ((await client.get("/protected")).status_code == 200) is signed_in
+
+
+async def test_auth_required_post_never_sets_next(app, client):
+    @app.post("/items/delete")
+    @auth_required("session")
+    async def delete_item():
+        return "deleted"
+
+    response = await client.post("/items/delete", headers={"Accept": "text/html"})
+    assert response.headers["Location"] == "/login"
+
+
+async def test_login_sends_a_signed_in_user_on(app, client):
+    await client.get("/login")
+    await client.post(
+        "/login", form={"email": "user@example.com", "password": "correct-password"}
+    )
+    response = await client.get("/login?next=/deep")
+    assert response.headers["Location"] == "/deep"
+    response = await client.get("/login?next=//evil.example")
+    assert response.headers["Location"] == "/protected"

@@ -498,6 +498,11 @@ async def login():
         # Every visit to the form replaces the target, so an abandoned one never
         # redirects a later login. The passkey and 2FA paths finish with it too.
         next_url = _safe_redirect_target(request.args.get("next"), fallback="")
+        # Like Devise and Flask-Security. The session cookie is SameSite, so a
+        # cross-site page cannot use this redirect to learn who is signed in.
+        if current_user.is_authenticated:
+            fallback = _resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login")
+            return redirect(next_url or fallback)
         if next_url:
             session["security_next"] = [next_url, int(time.time())]
         else:
