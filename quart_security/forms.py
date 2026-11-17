@@ -133,6 +133,10 @@ class WebAuthnRegisterForm(QuartForm):
     )
 
 
+class VerifyForm(QuartForm):
+    password = PasswordField("Password", validators=[DataRequired()])
+
+
 class WebAuthnVerifyForm(QuartForm):
     identity = StringField("Email", validators=[Optional()])
     credential = StringField("Credential", validators=[Optional()])

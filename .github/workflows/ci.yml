@@ -5,6 +5,10 @@ on:
     branches:
       - main
   pull_request:
+  # Dependencies are not locked, so a weekly run catches a breaking release
+  # before it blocks a version bump.
+  schedule:
+    - cron: "0 6 * * 1"
   # The release gate in publish.yml runs this before publishing.
   workflow_call:
 

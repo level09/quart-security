@@ -142,6 +142,8 @@ Core:
 - `SECURITY_COOKIE_SECURE` (default: `True`; sets `SESSION_COOKIE_SECURE`)
 - `SECURITY_FRESHNESS` (default: `60` minutes)
 
+A route with `auth_required(fresh=True)` needs a sign-in younger than `SECURITY_FRESHNESS`. Older sessions visiting it are sent to `/verify?next=<page>` to enter their password again, or use a passkey through `/wan-verify`, and then land back on the page. Failed attempts there count toward the login lockout. A user with neither is offered a sign-out. API calls to a stale route get 401, and a stale form POST goes to `/verify` without `next`.
+
 Password reset and email confirmation:
 - `SECURITY_RECOVERABLE` (default: `False`) - password reset by email at `/reset`
 - `SECURITY_CONFIRMABLE` (default: `False`) - self-registered accounts sign in only after confirming their email; needs a `confirmed_at` column
@@ -166,6 +168,7 @@ remaining codes are migrated.
 Accepted TOTP time steps, recovery codes, and WebAuthn challenges cannot be reused.
 Disabling an authenticator requires a current TOTP or unused recovery code.
 Wait for the next TOTP code if the current one was just used to sign in.
+A TOTP secret under 112 bits (16 base32 characters, the old pyotp default) fails like a wrong code and logs a warning naming the user, because pyotp 2.12 refuses it. Reset that user's two-factor so they enroll a new, 160-bit secret.
 
 WebAuthn:
 - `SECURITY_WEBAUTHN`
@@ -201,6 +204,7 @@ Core:
 - `/register`
 - `/logout` (POST only)
 - `/change`
+- `/verify` (fresh sign-in for `fresh=True` routes)
 - `/reset`, `/reset/<token>` (with `SECURITY_RECOVERABLE`)
 - `/confirm`, `/confirm/<token>` (with `SECURITY_CONFIRMABLE` and `SECURITY_REGISTERABLE`)
 

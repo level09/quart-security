@@ -208,3 +208,22 @@ async def test_recovery_regeneration_form_has_csrf_token(
     body = await response.get_data(as_text=True)
     assert 'name="csrf_token"' in body
     assert 'value=""' not in body
+
+
+@pytest.mark.asyncio
+async def test_legacy_short_totp_secret_fails_like_a_wrong_code(
+    client_two_factor, app_two_factor
+):
+    user = app_two_factor.extensions["test_basic_user"]
+    user.tf_primary_method = "authenticator"
+    # 80 bits, the old pyotp default; pyotp 2.12 refuses to build a TOTP from it.
+    user.tf_totp_secret = "JBSWY3DPEHPK3PXP"
+
+    await client_two_factor.post(
+        "/login",
+        form={"email": "user@example.com", "password": "correct-password"},
+    )
+    response = await client_two_factor.post("/tf-validate", form={"token": "123456"})
+
+    assert response.status_code == 200
+    assert user.failed_login_count == 1

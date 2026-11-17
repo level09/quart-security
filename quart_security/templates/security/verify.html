@@ -1,0 +1,21 @@
+{% from 'security/_macros.html' import render_input %}
+<!doctype html>
+<title>Confirm It's You</title>
+<h1>Confirm it's you</h1>
+<p>This page needs a recent sign-in.</p>
+{% if has_password %}
+<form method="post" action="{{ url_for_security('verify', next=next_url or None) }}">
+  {{ verify_form.hidden_tag() }}
+  {{ render_input(verify_form.password, 'password') }}
+  <button type="submit">Continue</button>
+</form>
+{% endif %}
+{% if has_passkey %}
+<p><a href="{{ url_for_security('wan_verify', next=next_url or None) }}">Use a passkey</a></p>
+{% endif %}
+{% if not has_password and not has_passkey %}
+<form method="post" action="{{ url_for_security('logout') }}">
+  {{ verify_form.hidden_tag() }}
+  <button type="submit">Sign out and sign in again</button>
+</form>
+{% endif %}

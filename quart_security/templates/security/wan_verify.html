@@ -3,7 +3,7 @@
 <h1>Verify with Passkey</h1>
 
 {% if not credential_options %}
-<form method="post" action="{{ url_for_security('wan_verify') }}" id="wan-verify-form">
+<form method="post" action="{{ url_for_security('wan_verify', next=request.args.get('next')) }}" id="wan-verify-form">
   {{ wan_verify_form.hidden_tag() }}
   <button type="submit">Verify</button>
 </form>

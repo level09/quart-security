@@ -237,7 +237,7 @@ async def test_stale_session_cannot_change_mfa(client_two_factor):
 
     response = await client_two_factor.get("/tf-setup")
 
-    assert response.status_code == 401
+    assert response.headers["Location"] == "/verify?next=/tf-setup"
 
 
 def test_safe_redirect_allows_good_paths():

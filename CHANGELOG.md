@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.4.0] - 2026-11-17
+
+### Added
+
+- `/verify` asks a signed-in user for their password again before a
+  `fresh=True` route, then returns to the page. A stale session visiting
+  `/change`, `/tf-setup`, `/mf-recovery-codes` or `/wan-register` lands there
+  instead of on a bare 401. Failures count toward the login lockout, a user
+  with a passkey can use `/wan-verify` instead, and a user with neither is
+  offered a sign-out. Override `security/verify.html` to style it.
+
+### Fixed
+
+- `/wan-verify` keeps `next` when its form is submitted. It always returned to
+  `/` before.
+- A TOTP secret under 112 bits fails like a wrong code and logs a warning
+  naming the user. pyotp 2.12 raises on such secrets, which turned 2FA sign-in
+  into a server error.
+
 ## [2.3.0] - 2026-11-16
 
 ### Changed

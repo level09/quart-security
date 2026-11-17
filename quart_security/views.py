@@ -27,12 +27,13 @@ from werkzeug.routing import BuildError
 
 from . import webauthn as wan
 from .breach import password_is_breached
-from .decorators import auth_required
+from .decorators import auth_required, session_is_fresh
 from .forms import (
     QuartForm,
     RecoveryCodeForm,
     TwoFactorSetupForm,
     TwoFactorVerifyForm,
+    VerifyForm,
     WebAuthnRegisterForm,
     WebAuthnVerifyForm,
 )
@@ -324,13 +325,22 @@ async def _pop_wan_state(key: str) -> dict | None:
     return await _security.state_store.pop(token) if isinstance(token, str) else None
 
 
-async def _verify_totp_once(secret, token):
+async def _verify_totp_once(secret, token, user=None):
     from .totp import decrypt_totp_secret, matching_totp_step
 
     if not secret or not token:
         return False
     secret = decrypt_totp_secret(secret)
-    step = matching_totp_step(secret, token)
+    try:
+        step = matching_totp_step(secret, token)
+    except ValueError:
+        # pyotp 2.12 refuses secrets under 112 bits, which older enrollments
+        # used. Fail like a wrong code and say so, so an admin can reset it.
+        current_app.logger.warning(
+            "TOTP secret for user %s is under 112 bits; reset their two-factor",
+            user.get_id() if user else "?",
+        )
+        return False
     if step is None:
         return False
     key = current_app.secret_key
@@ -837,6 +847,50 @@ async def logout():
     return redirect(url_for_security("login"))
 
 
+@security_bp.route("/verify", methods=["GET", "POST"])
+@auth_required("session")
+async def verify():
+    """Confirm a signed-in user again before a page that needs a fresh login."""
+    form = await VerifyForm.from_formdata()
+    await _enforce_csrf(getattr(form, "_submitted_csrf", None))
+    user = current_user
+    target = _safe_redirect_target(request.args.get("next"), fallback="")
+    fallback = _resolve_redirect("SECURITY_POST_LOGIN_VIEW", "login")
+    if not _is_post() and session_is_fresh():
+        return redirect(target or fallback)
+    has_password = bool(getattr(user, "password", None)) and getattr(
+        user, "has_usable_password", True
+    )
+
+    if _is_post() and has_password and form.validate():
+        # A stolen session must not get unlimited password guesses here, so
+        # failures count toward the same lockout as the login form.
+        if _account_is_locked(user):
+            await flash("Account temporarily locked. Try again later.", "error")
+        elif await verify_password_async(form.password.data, user.password):
+            await _reset_auth_failures(user)
+            await _commit()
+            session["_fresh"] = True
+            session["_auth_at"] = int(time.time())
+            return redirect(target or fallback)
+        else:
+            await _record_auth_failure(user)
+            await flash("Invalid password", "error")
+
+    has_passkey = (
+        current_app.config.get("SECURITY_WEBAUTHN", False)
+        and current_app.config.get("SECURITY_WAN_ALLOW_AS_MULTI_FACTOR", True)
+        and bool(await _list_webauthn_credentials(user))
+    )
+    return await render_template(
+        "security/verify.html",
+        verify_form=form,
+        has_password=has_password,
+        has_passkey=has_passkey,
+        next_url=target,
+    )
+
+
 @security_bp.route("/change", methods=["GET", "POST"])
 @auth_required("session", fresh=True)
 async def change_password():
@@ -937,7 +991,9 @@ async def two_factor_setup():
 
         if action == "disable":
             token = (form_data.get("token") or "").strip()
-            valid = await _verify_totp_once(current_user.tf_totp_secret, token)
+            valid = await _verify_totp_once(
+                current_user.tf_totp_secret, token, current_user
+            )
             if (
                 not valid
                 and token
@@ -1073,7 +1129,7 @@ async def two_factor_token_validation():
         valid = False
 
         if token and getattr(user, "tf_totp_secret", None):
-            valid = await _verify_totp_once(user.tf_totp_secret, token)
+            valid = await _verify_totp_once(user.tf_totp_secret, token, user)
 
         if (
             not valid
